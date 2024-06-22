@@ -1,0 +1,10 @@
+[package]
+name = "kvs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Burak Sekili <buraksekili@gmail.com>"]
+description = "A key-value store"
+
+[dependencies]
+assert_cmd = "0.11.0"
+predicates = "1.0.0"
