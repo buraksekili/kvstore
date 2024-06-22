@@ -7,4 +7,5 @@ description = "A key-value store"
 
 [dependencies]
 assert_cmd = "0.11.0"
+clap = { version = "4.5.7", features = ["cargo"] }
 predicates = "1.0.0"

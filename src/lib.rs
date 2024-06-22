@@ -1,18 +1,35 @@
-pub struct KvStore {}
+#![deny(missing_docs)]
+//! A simple key/value store.
 
+/// import hashmap
+use std::collections::HashMap;
+
+/// KvStore implements in memory database.
+pub struct KvStore {
+    map: HashMap<String, String>,
+}
+
+/// KvStore implements in memory database.
 impl KvStore {
+    /// new does something
     pub fn new() -> Self {
-        return KvStore {};
+        return KvStore {
+            map: HashMap::new(),
+        };
     }
 
-    pub fn set(&self, key: String, val: String) {
-        panic!("unimplemented set")
+    /// set runs set
+    pub fn set(&mut self, key: String, val: String) {
+        self.map.insert(key.clone(), val.clone());
     }
+
+    /// get runs get
     pub fn get(&self, key: String) -> Option<String> {
-        panic!("unimplemented get")
-        // Some(String::from("hello world"))
+        return self.map.get(&key).cloned();
     }
-    pub fn remove(&self, key: String) {
-        panic!("unimplemented remove")
+
+    /// remove runs remove
+    pub fn remove(&mut self, key: String) {
+        self.map.remove(&key);
     }
 }
