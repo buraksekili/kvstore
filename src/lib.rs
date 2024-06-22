@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 /// KvStore implements in memory database.
+#[derive(Default)]
 pub struct KvStore {
     map: HashMap<String, String>,
 }
@@ -12,10 +13,10 @@ pub struct KvStore {
 /// KvStore implements in memory database.
 impl KvStore {
     /// new does something
-    pub fn new() -> Self {
-        return KvStore {
+    pub fn new() -> KvStore {
+        KvStore {
             map: HashMap::new(),
-        };
+        }
     }
 
     /// set runs set
