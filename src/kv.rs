@@ -22,7 +22,7 @@ struct SetCmd {
 impl KvStore {
     /// new does something
     pub fn new(log_path: PathBuf) -> Result<Self> {
-        match OpenOptions::new().append(true).open(log_path) {
+        match OpenOptions::new().append(true).create(true).open(log_path) {
             Err(e) => {
                 eprintln!("failed to open log, err: {}", e);
                 Err(KvsError::LogInit)
@@ -40,8 +40,8 @@ impl KvStore {
             val: val.clone(),
         };
 
-        serde_json::to_writer(&mut self.writer, &c);
-        self.writer.flush();
+        serde_json::to_writer(&mut self.writer, &c)?;
+        self.writer.flush()?;
         Ok(())
     }
 
