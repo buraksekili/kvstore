@@ -13,9 +13,8 @@ pub struct KvStore {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct SetCmd {
-    key: String,
-    val: String,
+enum Command {
+    Set { key: String, val: String },
 }
 
 /// KvStore implements in memory database.
@@ -35,10 +34,7 @@ impl KvStore {
 
     /// set runs set
     pub fn set(&mut self, key: String, val: String) -> Result<()> {
-        let c = SetCmd {
-            key: key.clone(),
-            val: val.clone(),
-        };
+        let c = Command::Set { key: key, val: val };
 
         serde_json::to_writer(&mut self.writer, &c)?;
         self.writer.flush()?;
