@@ -53,7 +53,7 @@ fn main() -> Result<()> {
             let key = sub_m.get_one::<String>("key").unwrap();
             let val = sub_m.get_one::<String>("val").unwrap();
 
-            KvStore::new(PathBuf::from("./kvs.log"))?.set(key.into(), val.into())
+            KvStore::new()?.set(key.into(), val.into())
         }
         Some(("get", sub_m)) => {
             eprintln!("unimplemented");
