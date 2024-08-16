@@ -67,18 +67,20 @@ fn last_log_file_num() -> Option<u32> {
 
     let entries = fs::read_dir(curr).unwrap();
 
-    let mut y: Vec<_> = entries
+    let mut y: Vec<u32> = entries
         .filter_map(result::Result::ok)
-        .filter(|e| e.path().extension() == Some(PathBuf::from("log").as_os_str()))
-        .map(|e| {
-            e.path()
-                .file_stem()
+        .map(|a| a.path())
+        .filter(|path| path.is_file() && path.extension() == Some("log".as_ref()))
+        .flat_map(|path| {
+            path.file_name()
                 .and_then(OsStr::to_str)
-                .map(str::to_owned)
-            // .map(str::parse::<u64>)
+                .map(|file_name_str| {
+                    let x = file_name_str.trim_end_matches(".log");
+                    x.parse::<u32>()
+                })
         })
-        .filter_map(|file_stem_str| file_stem_str.and_then(|s| s.parse::<u32>().ok()))
-        .collect(); // Collect the results into a Vec<String>
+        .filter_map(result::Result::ok)
+        .collect();
 
     y.sort_unstable();
 
