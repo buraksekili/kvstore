@@ -62,9 +62,8 @@ fn main() -> Result<()> {
             // println!("Getting {key}");
         }
         Some(("rm", sub_m)) => {
-            eprintln!("unimplemented");
-            std::process::exit(1);
-            // let key = sub_m.get_one::<String>("key").unwrap();
+            let key = sub_m.get_one::<String>("key").unwrap();
+            KvStore::new()?.remove(key.into())
             // println!("Removing {key}");
         }
         _ => {

@@ -18,6 +18,7 @@ pub struct KvStore {
 #[derive(Serialize, Deserialize, Debug)]
 enum Command {
     Set { key: String, val: String },
+    Rm { key: String },
 }
 
 /// KvStore implements in memory database.
@@ -54,7 +55,11 @@ impl KvStore {
 
     /// remove runs remove
     pub fn remove(&mut self, key: String) -> Result<()> {
-        panic!();
+        let c = Command::Rm { key: key };
+
+        serde_json::to_writer(&mut self.writer, &c)?;
+        self.writer.flush()?;
+        Ok(())
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
