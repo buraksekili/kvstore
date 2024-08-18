@@ -2,17 +2,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::{KvsError, Result};
 use std::{
+    collections::HashMap,
     env,
     ffi::OsStr,
-    fs::{self, File, OpenOptions},
-    io::{BufWriter, Write},
-    path::PathBuf,
+    fs::{self, read, File, OpenOptions},
+    hash::Hash,
+    io::{BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
     result,
 };
 
 /// KvStore implements in memory database.
 pub struct KvStore {
     writer: BufWriter<File>,
+    readers: HashMap<u32, BufReader<File>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -21,24 +24,20 @@ enum Command {
     Rm { key: String },
 }
 
+fn new_writer(p: &Path) -> Result<BufWriter<File>> {
+    let buf_writer = BufWriter::new(
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .write(true)
+            .open(p)?,
+    );
+
+    Ok(buf_writer)
+}
+
 /// KvStore implements in memory database.
 impl KvStore {
-    /// new does something
-    pub fn new() -> Result<Self> {
-        let file_name = format!("{}.log", last_log_file_num().unwrap_or(0) + 1);
-        println!("file: {}", file_name);
-
-        match OpenOptions::new().append(true).create(true).open(file_name) {
-            Err(e) => {
-                eprintln!("failed to open log, err: {}", e);
-                Err(KvsError::LogInit)
-            }
-            Ok(file) => Ok(Self {
-                writer: BufWriter::new(file),
-            }),
-        }
-    }
-
     /// set runs set
     pub fn set(&mut self, key: String, val: String) -> Result<()> {
         let c = Command::Set { key: key, val: val };
@@ -50,7 +49,7 @@ impl KvStore {
 
     /// get runs get
     pub fn get(&self, key: String) -> Result<Option<String>> {
-        panic!();
+        Ok(Some(String::from("x")))
     }
 
     /// remove runs remove
@@ -63,14 +62,38 @@ impl KvStore {
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
-        panic!();
+        let p = path.into();
+
+        let mut readers: HashMap<u32, BufReader<File>> = HashMap::new();
+        let log_files = log_files(&p);
+
+        // read all log files, and save them in hash map.
+        for lf in &log_files {
+            readers.insert(*lf, BufReader::new(File::open(format!("{}.log", lf))?));
+        }
+
+        let new_log_idx = log_files.last().unwrap_or(&0) + 1;
+        let new_log_file_name = format!("{}.log", new_log_idx);
+        let new_log_writer: BufWriter<File> = BufWriter::new(
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(&new_log_file_name)?,
+        );
+        readers.insert(new_log_idx, BufReader::new(File::open(new_log_file_name)?));
+
+        println!("[DEBUG] writing into: {}", format!("{}.log", new_log_idx));
+
+        Ok(KvStore {
+            readers: readers,
+            writer: new_log_writer,
+        })
     }
 }
 
-fn last_log_file_num() -> Option<u32> {
-    let curr = env::current_dir().unwrap();
-
-    let entries = fs::read_dir(curr).unwrap();
+fn log_files(p: &Path) -> Vec<u32> {
+    let entries = fs::read_dir(p).unwrap();
 
     let mut y: Vec<u32> = entries
         .filter_map(result::Result::ok)
@@ -89,5 +112,5 @@ fn last_log_file_num() -> Option<u32> {
 
     y.sort_unstable();
 
-    y.last().copied()
+    y
 }

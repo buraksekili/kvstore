@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{env::current_dir, f32::consts::E, path::PathBuf};
 
 use clap::{arg, command, value_parser, Command};
 use kvs::{KvStore, KvsError, Result};
@@ -53,18 +53,19 @@ fn main() -> Result<()> {
             let key = sub_m.get_one::<String>("key").unwrap();
             let val = sub_m.get_one::<String>("val").unwrap();
 
-            KvStore::new()?.set(key.into(), val.into())
+            KvStore::open(current_dir()?)?.set(key.into(), val.into())
         }
         Some(("get", sub_m)) => {
-            eprintln!("unimplemented");
-            std::process::exit(1);
             // let key = sub_m.get_one::<String>("key").unwrap();
-            // println!("Getting {key}");
+            // match KvStore::new()?.get(key.to_string()) {
+            //     Ok(x) => println!("found {:?}", x),
+
+            Ok(())
         }
         Some(("rm", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
-            KvStore::new()?.remove(key.into())
-            // println!("Removing {key}");
+
+            KvStore::open(current_dir()?)?.remove(key.into())
         }
         _ => {
             eprintln!("unimplemented method, run `help`");
