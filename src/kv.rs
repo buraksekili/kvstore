@@ -1,4 +1,4 @@
-use crate::{buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, Result};
+use crate::{buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvsError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Deserializer;
 
@@ -124,8 +124,11 @@ impl KvStore {
         serde_json::to_writer(&mut self.writer, &c)?;
         self.writer.flush()?;
 
-        self.index.remove(&tmp_key).expect("key not found");
-        Ok(())
+        if let Some(_) = self.index.remove(&tmp_key) {
+            Ok(())
+        } else {
+            Err(KvsError::KeyNotFound)
+        }
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
@@ -137,10 +140,14 @@ impl KvStore {
         let log_files = log_files(&p);
         let mut index: BTreeMap<String, CommandPos> = BTreeMap::new();
 
+        let new_log_idx = log_files.last().unwrap_or(&0) + 1;
+        let new_log_file_name = format!("{}.log", new_log_idx);
+        let new_log_file_path = p.join(&new_log_file_name);
+
         // read all log files, and save them in hash map.
         let mut readers: HashMap<u32, BufReaderWithPos<File>> = HashMap::new();
         for lf_idx in &log_files {
-            let mut reader = BufReaderWithPos::new(File::open(format!("{}.log", lf_idx))?)?;
+            let mut reader = BufReaderWithPos::new(File::open(&new_log_file_path)?)?;
 
             // build up our index tree.
             // start reading from the beginning.
@@ -184,9 +191,6 @@ impl KvStore {
         }
 
         // create a new log file.
-        let new_log_idx = log_files.last().unwrap_or(&0) + 1;
-        let new_log_file_name = format!("{}.log", new_log_idx);
-        let new_log_file_path = p.join(&new_log_file_name);
         let new_log_writer: BufWriterWithPos<File> = BufWriterWithPos::new(
             OpenOptions::new()
                 .create(true)

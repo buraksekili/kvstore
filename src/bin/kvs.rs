@@ -1,7 +1,7 @@
-use std::env::current_dir;
+use std::{env::current_dir, process::exit};
 
 use clap::{arg, command, value_parser, Command};
-use kvs::{KvStore, Result};
+use kvs::{KvStore, KvsError, Result};
 
 fn main() -> Result<()> {
     let matches = command!()
@@ -89,7 +89,14 @@ fn main() -> Result<()> {
         Some(("rm", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
 
-            KvStore::open(current_dir()?)?.remove(key.into())
+            match KvStore::open(current_dir()?)?.remove(key.into()) {
+                Ok(()) => Ok(()),
+                Err(KvsError::KeyNotFound) => {
+                    print!("Key not found");
+                    exit(1);
+                }
+                Err(e) => Err(e),
+            }
         }
         _ => {
             eprintln!("unimplemented method, run `help`");
