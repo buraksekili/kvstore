@@ -134,7 +134,7 @@ impl KvStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
         // copy the path
         let p = path.into();
-        fs::create_dir_all(&p)?;
+        // fs::create_dir_all(&p)?;
 
         // get all log files in the given path
         let log_files = log_files(&p);
@@ -147,7 +147,7 @@ impl KvStore {
         // read all log files, and save them in hash map.
         let mut readers: HashMap<u32, BufReaderWithPos<File>> = HashMap::new();
         for lf_idx in &log_files {
-            let mut reader = BufReaderWithPos::new(File::open(&new_log_file_path)?)?;
+            let mut reader = BufReaderWithPos::new(File::open(p.join(format!("{}.log", lf_idx)))?)?;
 
             // build up our index tree.
             // start reading from the beginning.

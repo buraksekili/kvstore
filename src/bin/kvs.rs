@@ -80,7 +80,7 @@ fn main() -> Result<()> {
                 if let Some(v) = result {
                     println!("{}", v);
                 } else {
-                    println!("Key not found for {}", key);
+                    println!("Key not found");
                 }
             };
 
