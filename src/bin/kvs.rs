@@ -1,13 +1,14 @@
-use std::{env::current_dir, f32::consts::E, path::PathBuf};
+use std::env::current_dir;
 
 use clap::{arg, command, value_parser, Command};
-use kvs::{KvStore, KvsError, Result};
+use kvs::{KvStore, Result};
 
 fn main() -> Result<()> {
     let matches = command!()
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .about(env!("CARGO_PKG_DESCRIPTION"))
+        .subcommand(Command::new("t"))
         .subcommand(
             Command::new("set")
                 .about("Set the value of a string key to a string")
@@ -49,16 +50,39 @@ fn main() -> Result<()> {
         .get_matches();
 
     match matches.subcommand() {
+        Some(("t", _sub_m)) => {
+            let mut store = KvStore::open(current_dir()?)?;
+            store.set("key1".to_owned(), "value1".to_owned())?;
+            store.set("key2".to_owned(), "value2".to_owned())?;
+            drop(store);
+
+            if let Ok(result) = KvStore::open(current_dir()?)?.get("key1".to_string()) {
+                if let Some(v) = result {
+                    println!("{}", v);
+                } else {
+                    println!("Key not found for key1");
+                }
+            };
+
+            Ok(())
+        }
         Some(("set", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
             let val = sub_m.get_one::<String>("val").unwrap();
 
-            KvStore::open(current_dir()?)?.set(key.into(), val.into())
+            KvStore::open(current_dir()?)?.set(key.into(), val.into())?;
+
+            Ok(())
         }
         Some(("get", sub_m)) => {
-            // let key = sub_m.get_one::<String>("key").unwrap();
-            // match KvStore::new()?.get(key.to_string()) {
-            //     Ok(x) => println!("found {:?}", x),
+            let key = sub_m.get_one::<String>("key").unwrap();
+            if let Ok(result) = KvStore::open(current_dir()?)?.get(key.to_string()) {
+                if let Some(v) = result {
+                    println!("{}", v);
+                } else {
+                    println!("Key not found for {}", key);
+                }
+            };
 
             Ok(())
         }

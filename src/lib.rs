@@ -1,4 +1,6 @@
 //! A simple key/value store.
+mod buf_reader;
+mod buf_writer;
 mod error;
 mod kv;
 
