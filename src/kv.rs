@@ -6,10 +6,12 @@ use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    result,
+    result, u32,
 };
+
+const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
 /// KvStore implements in memory database.
 pub struct KvStore {
@@ -28,12 +30,6 @@ pub struct KvStore {
 
     // path refers to the directory path for the log files.
     path: PathBuf,
-    // least_idx corresponds to the smallest log file index number.
-    // during the compaction, we'll delete the log files between
-    // least_idx and the entry stored in key_dir which has smallest index.
-    // It means that the compaction will happen between the oldest log file
-    // and the oldest active data.
-    least_idx: u32,
 
     uncompacted: u64,
 }
@@ -53,28 +49,104 @@ enum Command {
 
 /// KvStore implements in memory database.
 impl KvStore {
+    // compaction runs merging of bitcask.
+    // when uncompacted bytes amount reaches the threshold, the compaction will be run in next set command.
+    //
+    // 1- it first creates a new log entry which will copy entries from previous logs that are
+    // active at the moment (which means active in key_dir hash map). Therefore, the new log entry
+    // will be the reflection of our in-memory key_dir map.
+    // 2- after creating this new log file, it removes the previous log files.
     fn compaction(&mut self) -> Result<()> {
-        // println!("running compaction!");
+        // Create a new log file including all the commands stored in in-memory keydir map.
+        let new_compaction_log_idx = self.log_idx + 1;
+        let new_log_file_path = self.path.join(format!("{}.log", &new_compaction_log_idx));
+        println!("running -> new compaction idx: {}", new_compaction_log_idx);
 
-        if let Some(min_key) = self
-            .key_dir
-            .iter()
-            .min_by(|&(_key1, cmd1), &(_key2, cmd2)| cmd1.log_idx.cmp(&cmd2.log_idx))
-        {
-            let new_starting_idx = &min_key.1.log_idx;
-            // println!("new idx: {}", self.least_idx);
-            // println!("new end idx: {}", new_starting_idx);
-            for i in self.least_idx..*new_starting_idx {
-                if self.readers.contains_key(&i) {
-                    let merged_file_path = self.path.join(format!("{}.log", i));
-                    println!("going to delete ------> {:?}", merged_file_path);
-                    fs::remove_file(merged_file_path)?;
-                }
+        // self.log_idx + 1 corresponds to the new log file which will include all active
+        // commands in the memory. So, the new requests need to be moved to self.log_idx + 2
+        // which will be new log entry in the file system.
+        self.log_idx += 2;
+        // now, update the writer so that the new log entries will be written into a new log file.
+        self.writer = BufWriterWithPos::new(
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(self.path.join(format!("{}.log", self.log_idx)))?,
+        )?;
+
+        println!("running -> new log idx: {}", self.log_idx);
+
+        // create a writer for the log entry which will include the command details of the
+        // existing commands on the memory.
+        let mut new_log_writer: BufWriterWithPos<File> = BufWriterWithPos::new(
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(&new_log_file_path)?,
+        )?;
+
+        let mut new_starting_pos = 0 as u64;
+        // iterate through the active keys on the memory.
+        for cmd_pos in &mut self.key_dir.values_mut() {
+            // get the reader of the log entry.
+            let reader = self
+                .readers
+                .get_mut(&cmd_pos.log_idx)
+                .expect("failed to find reader of the key");
+
+            // if the position of the reader is not pointing to the correct command in the log file,
+            // move it to the current position for the command.
+            // assume that you have multiple commands in a log file where duplication for keys may appear.
+            // for example, one log file may include "{set a 1}, {set b 2}, {set a 2}" where we have duplicated
+            // set command for key 'a' and the first one is redundant. based on this log, our memory only have
+            // one entry for key 'a' which has value 2. So, while reading this log, we must ensure that
+            // reader is point to the position where '{set a 2}' command belongs to instead of '{set a 1}' command.
+            // therefore, seek the offset to the correct starting point for the key here if it is not pointing
+            // to the correct place.
+            if reader.pos != cmd_pos.starting_pos {
+                reader.seek(SeekFrom::Start(cmd_pos.starting_pos))?;
             }
 
-            self.least_idx = *new_starting_idx;
-            self.uncompacted = 0;
+            // After moving the correct place in the file, now we need to copy the existing entry
+            // to the new log. In order to do that, we need to read `cmd_pos.len` many bytes from
+            // the reader and then copy the content of it to the new log writer.
+            let mut r = reader.take(cmd_pos.len);
+            let copied_bytes = io::copy(&mut r, &mut new_log_writer)?;
+
+            // after copying the entry to the new log, we must ensure that our in-memory reference
+            // to CommandPos (which includes details of each command in the log file) is up to date
+            // according to the latest changes.
+            *cmd_pos = CommandPos {
+                log_idx: new_compaction_log_idx,
+                starting_pos: new_starting_pos,
+                len: copied_bytes,
+            };
+
+            // as we wrote 'copied_bytes' many bytes to the new log file, we must move 'new_starting_pos'
+            // to 'copied_bytes' ahead.
+            new_starting_pos += copied_bytes;
         }
+        new_log_writer.flush()?;
+
+        // Now, it is time to delete previous log files as their details already moved to the new log.
+        let mut stale_log_idx: Vec<u32> = Vec::new();
+
+        // Do not directly delete from self.readers while reading it as it
+        // will corrupt hash map structure.
+        for i in &self.readers {
+            stale_log_idx.push(*i.0);
+        }
+        println!("stale: {:?}", stale_log_idx);
+
+        for i in &stale_log_idx {
+            println!("removing: {}", &i);
+            self.readers.remove(&i);
+            fs::remove_file(self.path.join(format!("{}.log", i)))?;
+        }
+
+        self.uncompacted = 0;
 
         Ok(())
     }
@@ -110,7 +182,7 @@ impl KvStore {
             self.uncompacted += old_cmd.len;
         }
 
-        if self.uncompacted > 1024 * 1024 {
+        if self.uncompacted > COMPACTION_THRESHOLD {
             return self.compaction();
         }
 
@@ -194,7 +266,6 @@ impl KvStore {
 
         // read all log files, and save them in hash map.
         let mut readers: HashMap<u32, BufReaderWithPos<File>> = HashMap::new();
-        let mut least_idx = u32::max_value();
         let mut uncompacted = 0 as u64;
         for lf_idx in &log_files {
             let curr_file_path = p.join(format!("{}.log", lf_idx));
@@ -243,9 +314,6 @@ impl KvStore {
             // once completing operations on a reader, add it to an in-memory
             // structure for future references.
             readers.insert(*lf_idx, reader);
-            if *lf_idx < least_idx {
-                least_idx = *lf_idx;
-            }
         }
 
         // create a new log file.
@@ -267,7 +335,6 @@ impl KvStore {
             key_dir: index,
             writer: new_log_writer,
             path: p,
-            least_idx,
             uncompacted,
         })
     }

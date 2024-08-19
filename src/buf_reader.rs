@@ -4,7 +4,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 // reference: ping-cap/talent-course
 pub struct BufReaderWithPos<R: Read + Seek> {
     pub reader: BufReader<R>,
-    pos: u64,
+    pub pos: u64,
 }
 
 // methods for BufReaderWithPos
