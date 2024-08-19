@@ -1,6 +1,6 @@
 use std::{env::current_dir, process::exit};
 
-use clap::{arg, command, value_parser, Arg, Command};
+use clap::{arg, command, value_parser, Command};
 use kvs::{KvStore, KvsError, Result};
 
 fn main() -> Result<()> {
@@ -13,6 +13,7 @@ fn main() -> Result<()> {
                 --addr <IP_PORT> "IP address of the server"
             )
             .required(false)
+            .default_value("127.0.0.1:4000")
             .global(true)
             .value_parser(value_parser!(String)),
         )
