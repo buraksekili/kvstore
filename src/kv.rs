@@ -19,9 +19,23 @@ pub struct KvStore {
     readers: HashMap<u32, BufReaderWithPos<File>>,
 
     // A map of keys to log pointers.
-    index: BTreeMap<String, CommandPos>,
+    // We store each command's position in the log file.
+    // To find out which log file contains this key, you can check
+    // CommandPos's `log_idx` field.
+    key_dir: BTreeMap<String, CommandPos>,
 
     log_idx: u32,
+
+    // path refers to the directory path for the log files.
+    path: PathBuf,
+    // least_idx corresponds to the smallest log file index number.
+    // during the compaction, we'll delete the log files between
+    // least_idx and the entry stored in key_dir which has smallest index.
+    // It means that the compaction will happen between the oldest log file
+    // and the oldest active data.
+    least_idx: u32,
+
+    uncompacted: u64,
 }
 
 #[derive(Debug)]
@@ -39,11 +53,38 @@ enum Command {
 
 /// KvStore implements in memory database.
 impl KvStore {
+    fn compaction(&mut self) -> Result<()> {
+        // println!("running compaction!");
+
+        if let Some(min_key) = self
+            .key_dir
+            .iter()
+            .min_by(|&(_key1, cmd1), &(_key2, cmd2)| cmd1.log_idx.cmp(&cmd2.log_idx))
+        {
+            let new_starting_idx = &min_key.1.log_idx;
+            // println!("new idx: {}", self.least_idx);
+            // println!("new end idx: {}", new_starting_idx);
+            for i in self.least_idx..*new_starting_idx {
+                if self.readers.contains_key(&i) {
+                    let merged_file_path = self.path.join(format!("{}.log", i));
+                    println!("going to delete ------> {:?}", merged_file_path);
+                    fs::remove_file(merged_file_path)?;
+                }
+            }
+
+            self.least_idx = *new_starting_idx;
+            self.uncompacted = 0;
+        }
+
+        Ok(())
+    }
+
     pub fn t(&mut self) {
-        for i in &self.index {
+        for i in &self.key_dir {
             println!("i: {:?}\t{:?}", i.0, i.1);
         }
     }
+
     /// set runs set
     pub fn set(&mut self, k: String, val: String) -> Result<()> {
         let key = k.clone();
@@ -56,22 +97,29 @@ impl KvStore {
 
         // Now, update in-memory index file. Whenever clients want to read
         // a key, we'll first go through the index map.
-
         let cmd_pos = CommandPos {
             log_idx: self.log_idx,
             starting_pos: prev_pos,
             len: self.writer.pos - prev_pos,
         };
 
-        self.index.insert(k.clone(), cmd_pos);
-        // println!("testing: {:?}", self.index.get(&k.clone()));
+        // if we have some here, it means that our map already contains the value.
+        // So, we can understand that our storage will include some duplicated
+        // data which can be uncompacted.
+        if let Some(old_cmd) = self.key_dir.insert(k, cmd_pos) {
+            self.uncompacted += old_cmd.len;
+        }
+
+        if self.uncompacted > 1024 * 1024 {
+            return self.compaction();
+        }
 
         Ok(())
     }
 
     /// get runs get
     pub fn get(&mut self, input_key: String) -> Result<Option<String>> {
-        let result = self.index.get(&input_key).and_then(|pos| {
+        let result = self.key_dir.get(&input_key).and_then(|pos| {
             let reader = self.readers.get_mut(&pos.log_idx).unwrap();
             // move file pointer to the position where our log starts.
             reader.seek(SeekFrom::Start(pos.starting_pos)).unwrap();
@@ -124,7 +172,7 @@ impl KvStore {
         serde_json::to_writer(&mut self.writer, &c)?;
         self.writer.flush()?;
 
-        if let Some(_) = self.index.remove(&tmp_key) {
+        if let Some(_) = self.key_dir.remove(&tmp_key) {
             Ok(())
         } else {
             Err(KvsError::KeyNotFound)
@@ -146,8 +194,11 @@ impl KvStore {
 
         // read all log files, and save them in hash map.
         let mut readers: HashMap<u32, BufReaderWithPos<File>> = HashMap::new();
+        let mut least_idx = u32::max_value();
+        let mut uncompacted = 0 as u64;
         for lf_idx in &log_files {
-            let mut reader = BufReaderWithPos::new(File::open(p.join(format!("{}.log", lf_idx)))?)?;
+            let curr_file_path = p.join(format!("{}.log", lf_idx));
+            let mut reader = BufReaderWithPos::new(File::open(&curr_file_path)?)?;
 
             // build up our index tree.
             // start reading from the beginning.
@@ -163,17 +214,21 @@ impl KvStore {
 
                 match cmd? {
                     Command::Set { key, val: _ } => {
-                        index.insert(
+                        if let Some(old_cmd) = index.insert(
                             key,
                             CommandPos {
                                 log_idx: *lf_idx,
                                 starting_pos,
                                 len: read_so_far - starting_pos,
                             },
-                        );
+                        ) {
+                            uncompacted += old_cmd.len;
+                        }
                     }
                     Command::Remove { key } => {
-                        index.remove(&key);
+                        if let Some(old_cmd) = index.remove(&key) {
+                            uncompacted += old_cmd.len;
+                        }
                     }
                 };
 
@@ -188,6 +243,9 @@ impl KvStore {
             // once completing operations on a reader, add it to an in-memory
             // structure for future references.
             readers.insert(*lf_idx, reader);
+            if *lf_idx < least_idx {
+                least_idx = *lf_idx;
+            }
         }
 
         // create a new log file.
@@ -206,8 +264,11 @@ impl KvStore {
         Ok(KvStore {
             readers,
             log_idx: new_log_idx,
-            index,
+            key_dir: index,
             writer: new_log_writer,
+            path: p,
+            least_idx,
+            uncompacted,
         })
     }
 }
