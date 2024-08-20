@@ -1,9 +1,17 @@
-use std::{env::current_dir, process::exit};
+use std::{
+    env::current_dir,
+    io::{BufWriter, Write},
+    net::{TcpListener, TcpStream},
+    process::{exit, id},
+};
 
 use clap::{arg, command, value_parser, Command};
-use kvs::{KvStore, KvsError, Result};
+use kvs::{transport::Request, KvStore, KvsError, Result};
+use log::{debug, error};
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     let matches = command!()
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
@@ -13,6 +21,7 @@ fn main() -> Result<()> {
                 --addr <IP_PORT> "IP address of the server"
             )
             .required(false)
+            .id("ip")
             .default_value("127.0.0.1:4000")
             .global(true)
             .value_parser(value_parser!(String)),
@@ -58,6 +67,11 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
+    let ip = matches.get_one::<String>("ip").unwrap();
+    debug!("Trying to connect server on {}", ip);
+    let mut stream = TcpStream::connect(ip);
+    debug!("Connected to server on {}", ip);
+
     match matches.subcommand() {
         Some(("t", _sub_m)) => {
             let mut store = KvStore::open(current_dir()?)?;
@@ -79,7 +93,22 @@ fn main() -> Result<()> {
             let key = sub_m.get_one::<String>("key").unwrap();
             let val = sub_m.get_one::<String>("val").unwrap();
 
-            KvStore::open(current_dir()?)?.set(key.into(), val.into())?;
+            let mut client_writer = BufWriter::new(stream?);
+            match serde_json::to_writer(
+                &mut client_writer,
+                &Request::Set {
+                    key: key.to_string(),
+                    val: val.to_string(),
+                },
+            ) {
+                Err(e) => error!("failed to serialize request, err: {}", e),
+                Ok(_) => debug!("serialized the value"),
+            };
+
+            client_writer.flush()?;
+            // stream?.write()
+
+            // KvStore::open(current_dir()?)?.set(key.into(), val.into())?;
 
             Ok(())
         }

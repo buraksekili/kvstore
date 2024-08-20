@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         .get_matches();
 
     let ip = matches.get_one::<String>("ip").unwrap();
-    debug!("Trying to connect {}", ip);
+    debug!("Trying to listen on {}", ip);
     let listener = TcpListener::bind(ip)?;
     debug!("Listening on: {}", ip);
 
