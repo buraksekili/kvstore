@@ -7,8 +7,8 @@ pub enum Request {
     Rm { key: String },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Response {
-    Error: Option<String>,
-    Result: String,
+    pub Error: Option<String>,
+    pub Result: String,
 }

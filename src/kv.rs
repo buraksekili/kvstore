@@ -1,4 +1,6 @@
-use crate::{buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvsError, Result};
+use crate::{
+    buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvEngine, KvsError, Result,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Deserializer;
 
@@ -45,6 +47,20 @@ struct CommandPos {
 enum Command {
     Set { key: String, val: String },
     Remove { key: String },
+}
+
+impl KvEngine for KvStore {
+    fn set(&mut self, k: String, val: String) -> Result<()> {
+        self.set(k, val)
+    }
+
+    fn get(&mut self, input_key: String) -> Result<Option<String>> {
+        self.get(input_key)
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        self.remove(key)
+    }
 }
 
 /// KvStore implements in memory database.
@@ -166,6 +182,7 @@ impl KvStore {
         // Write Set command to the log.
         serde_json::to_writer(&mut self.writer, &c)?;
         self.writer.flush()?;
+        println!("DONE WRITING ");
 
         // Now, update in-memory index file. Whenever clients want to read
         // a key, we'll first go through the index map.

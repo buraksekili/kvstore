@@ -1,13 +1,18 @@
 use std::{
     env::current_dir,
-    io::{BufWriter, Write},
-    net::{TcpListener, TcpStream},
-    process::{exit, id},
+    io::{BufReader, BufWriter, Write},
+    net::TcpStream,
+    process::exit,
 };
 
 use clap::{arg, command, value_parser, Command};
-use kvs::{transport::Request, KvStore, KvsError, Result};
-use log::{debug, error};
+use kvs::{
+    transport::{Request, Response},
+    KvStore, KvsError, Result,
+};
+use log::{debug, error, info};
+use serde::Deserialize;
+use serde_json::Deserializer;
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -69,33 +74,20 @@ fn main() -> Result<()> {
 
     let ip = matches.get_one::<String>("ip").unwrap();
     debug!("Trying to connect server on {}", ip);
-    let mut stream = TcpStream::connect(ip);
+    let read_stream = TcpStream::connect(ip)?;
+    let mut response_reader = BufReader::new(&read_stream);
+
+    let write_stream = read_stream.try_clone()?;
+    let mut request_writer = BufWriter::new(&write_stream);
     debug!("Connected to server on {}", ip);
-    let mut client_writer = BufWriter::new(stream?);
 
     match matches.subcommand() {
-        Some(("t", _sub_m)) => {
-            let mut store = KvStore::open(current_dir()?)?;
-            store.set("key1".to_owned(), "value1".to_owned())?;
-            store.set("key2".to_owned(), "value2".to_owned())?;
-            drop(store);
-
-            if let Ok(result) = KvStore::open(current_dir()?)?.get("key1".to_string()) {
-                if let Some(v) = result {
-                    println!("{}", v);
-                } else {
-                    println!("Key not found for key1");
-                }
-            };
-
-            Ok(())
-        }
         Some(("set", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
             let val = sub_m.get_one::<String>("val").unwrap();
 
             match serde_json::to_writer(
-                &mut client_writer,
+                &mut request_writer,
                 &Request::Set {
                     key: key.to_string(),
                     val: val.to_string(),
@@ -105,10 +97,7 @@ fn main() -> Result<()> {
                 Ok(_) => debug!("serialized the SET request"),
             };
 
-            client_writer.flush()?;
-            // stream?.write()
-
-            // KvStore::open(current_dir()?)?.set(key.into(), val.into())?;
+            request_writer.flush()?;
 
             Ok(())
         }
@@ -116,7 +105,7 @@ fn main() -> Result<()> {
             let key = sub_m.get_one::<String>("key").unwrap();
 
             match serde_json::to_writer(
-                &mut client_writer,
+                &mut request_writer,
                 &Request::Get {
                     key: key.to_string(),
                 },
@@ -124,26 +113,35 @@ fn main() -> Result<()> {
                 Err(e) => error!("failed to serialize GET request, err: {}", e),
                 Ok(_) => debug!("serialized the GET request"),
             };
+            request_writer.flush()?;
 
-            client_writer.flush()?;
+            debug!("waiting to receive");
+            // It is expected that the input stream ends after the deserialized object.
+            // If the stream does not end, such as in the case of a persistent socket connection,
+            // this function will not return.
+            // It is possible instead to deserialize from a prefix of an input stream without
+            // looking for EOF by managing your own Deserializer.
+            // reference:
+            //  -   https://docs.rs/serde_json/latest/serde_json/fn.from_reader.html
+            //  -   https://github.com/serde-rs/json/issues/522
+            let mut de = serde_json::Deserializer::from_reader(response_reader);
+            debug!("1");
+            let resp = Response::deserialize(&mut de)?;
 
-            if let Ok(result) = KvStore::open(current_dir()?)?.get(key.to_string()) {
-                if let Some(v) = result {
-                    println!("{}", v);
-                } else {
-                    println!("Key not found");
-                }
-            };
+            if let Some(e) = resp.Error {
+                eprintln!("Error: {}", e);
+                return Err(KvsError::JSONParser(e));
+            }
+
+            println!("{}", resp.Result);
 
             Ok(())
         }
         Some(("rm", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
 
-            let key = sub_m.get_one::<String>("key").unwrap();
-
             match serde_json::to_writer(
-                &mut client_writer,
+                &mut request_writer,
                 &Request::Rm {
                     key: key.to_string(),
                 },
@@ -152,16 +150,9 @@ fn main() -> Result<()> {
                 Ok(_) => debug!("serialized the RM request"),
             };
 
-            client_writer.flush()?;
+            request_writer.flush()?;
 
-            match KvStore::open(current_dir()?)?.remove(key.into()) {
-                Ok(()) => Ok(()),
-                Err(KvsError::KeyNotFound) => {
-                    print!("Key not found");
-                    exit(1);
-                }
-                Err(e) => Err(e),
-            }
+            Ok(())
         }
         _ => {
             eprintln!("unimplemented method, run `help`");

@@ -1,11 +1,12 @@
-use std::net::TcpListener;
+use std::env::current_dir;
 
 use clap::{arg, builder::PossibleValue, command, value_parser};
-use kvs::{server, Result};
-use log::{self, debug, error, warn};
+use kvs::{server::KvServer, KvStore, Result};
+use log::{self, debug, warn};
 
 fn main() -> Result<()> {
     env_logger::init();
+
     warn!("some warning");
 
     let matches = command!()
@@ -35,21 +36,14 @@ fn main() -> Result<()> {
         .get_matches();
 
     let ip = matches.get_one::<String>("ip").unwrap();
-    debug!("Trying to listen on {}", ip);
-    let listener = TcpListener::bind(ip)?;
-    debug!("Listening on: {}", ip);
+
+    let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string());
 
     if let Some(engine) = matches.get_one::<String>("engine") {
         debug!("current engine: {}", engine);
     }
 
-    // accept connections and process them serially
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => server::handle_client_req(s),
-            Err(e) => error!("failed to parse client request, err: {}", e),
-        }
-    }
+    server.start()?;
 
     Ok(())
 }
