@@ -71,6 +71,7 @@ fn main() -> Result<()> {
     debug!("Trying to connect server on {}", ip);
     let mut stream = TcpStream::connect(ip);
     debug!("Connected to server on {}", ip);
+    let mut client_writer = BufWriter::new(stream?);
 
     match matches.subcommand() {
         Some(("t", _sub_m)) => {
@@ -93,7 +94,6 @@ fn main() -> Result<()> {
             let key = sub_m.get_one::<String>("key").unwrap();
             let val = sub_m.get_one::<String>("val").unwrap();
 
-            let mut client_writer = BufWriter::new(stream?);
             match serde_json::to_writer(
                 &mut client_writer,
                 &Request::Set {
@@ -101,8 +101,8 @@ fn main() -> Result<()> {
                     val: val.to_string(),
                 },
             ) {
-                Err(e) => error!("failed to serialize request, err: {}", e),
-                Ok(_) => debug!("serialized the value"),
+                Err(e) => error!("failed to serialize SET request, err: {}", e),
+                Ok(_) => debug!("serialized the SET request"),
             };
 
             client_writer.flush()?;
@@ -114,6 +114,19 @@ fn main() -> Result<()> {
         }
         Some(("get", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
+
+            match serde_json::to_writer(
+                &mut client_writer,
+                &Request::Get {
+                    key: key.to_string(),
+                },
+            ) {
+                Err(e) => error!("failed to serialize GET request, err: {}", e),
+                Ok(_) => debug!("serialized the GET request"),
+            };
+
+            client_writer.flush()?;
+
             if let Ok(result) = KvStore::open(current_dir()?)?.get(key.to_string()) {
                 if let Some(v) = result {
                     println!("{}", v);
@@ -126,6 +139,20 @@ fn main() -> Result<()> {
         }
         Some(("rm", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
+
+            let key = sub_m.get_one::<String>("key").unwrap();
+
+            match serde_json::to_writer(
+                &mut client_writer,
+                &Request::Rm {
+                    key: key.to_string(),
+                },
+            ) {
+                Err(e) => error!("failed to serialize RM request, err: {}", e),
+                Ok(_) => debug!("serialized the RM request"),
+            };
+
+            client_writer.flush()?;
 
             match KvStore::open(current_dir()?)?.remove(key.into()) {
                 Ok(()) => Ok(()),

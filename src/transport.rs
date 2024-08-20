@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub enum Request {
     Get { key: String },
     Set { key: String, val: String },
+    Rm { key: String },
 }
 
 #[derive(Serialize, Deserialize)]

@@ -13,6 +13,7 @@ pub fn handle_client_req(s: std::net::TcpStream) {
     match &req {
         Request::Get { key } => debug!("we got GET request"),
         Request::Set { key, val } => debug!("we got SET request"),
+        Request::Rm { key } => debug!("we got RM request"),
     }
 
     debug!("The request: {:?}", req);
