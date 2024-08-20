@@ -1,9 +1,12 @@
+use std::net::TcpListener;
+
 use clap::{arg, builder::PossibleValue, command, value_parser};
-use kvs::Result;
-use log::{self, debug, error, info, warn, LevelFilter};
+use kvs::{server, Result};
+use log::{self, debug, error, warn};
 
 fn main() -> Result<()> {
-    env_logger::builder().filter_level(LevelFilter::Info).init();
+    env_logger::init();
+    warn!("some warning");
 
     let matches = command!()
         .version(env!("CARGO_PKG_VERSION"))
@@ -31,12 +34,21 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    if let Some(ip) = matches.get_one::<String>("ip") {
-        info!("ip address: {}", ip);
-    }
+    let ip = matches.get_one::<String>("ip").unwrap();
+    debug!("Trying to connect {}", ip);
+    let listener = TcpListener::bind(ip)?;
+    debug!("Listening on: {}", ip);
 
     if let Some(engine) = matches.get_one::<String>("engine") {
-        info!("current engine: {}", engine);
+        debug!("current engine: {}", engine);
+    }
+
+    // accept connections and process them serially
+    for stream in listener.incoming() {
+        match stream {
+            Ok(s) => server::handle_client_req(s),
+            Err(e) => error!("failed to parse client request, err: {}", e),
+        }
     }
 
     Ok(())

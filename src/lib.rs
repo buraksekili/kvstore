@@ -3,6 +3,7 @@ mod buf_reader;
 mod buf_writer;
 mod error;
 mod kv;
+pub mod server;
 
 pub use error::{KvsError, Result};
 pub use kv::KvStore;
