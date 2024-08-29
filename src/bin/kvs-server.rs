@@ -7,8 +7,6 @@ use log::{self, debug, warn};
 fn main() -> Result<()> {
     env_logger::init();
 
-    warn!("some warning");
-
     let matches = command!()
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))

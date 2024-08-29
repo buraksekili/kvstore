@@ -8,6 +8,7 @@ pub mod server;
 pub mod transport;
 
 pub use engine::KvEngine;
+mod data_format;
 
 pub use error::{KvsError, Result};
 pub use kv::KvStore;

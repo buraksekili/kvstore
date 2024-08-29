@@ -11,7 +11,7 @@ pub enum KvsError {
     LogInit,
 
     #[fail(display = "{}", 0)]
-    JSONParser(String),
+    Parser(String),
 
     #[fail(display = "{}", 0)]
     IO(String),
@@ -19,13 +19,19 @@ pub enum KvsError {
 
 impl From<serde_json::Error> for KvsError {
     fn from(value: serde_json::Error) -> KvsError {
-        Self::JSONParser(value.to_string())
+        Self::Parser(value.to_string())
     }
 }
 
 impl From<io::Error> for KvsError {
     fn from(value: io::Error) -> Self {
         Self::IO(value.to_string())
+    }
+}
+
+impl From<kvs_protocol::error::Error> for KvsError {
+    fn from(value: kvs_protocol::error::Error) -> Self {
+        Self::Parser(value.to_string())
     }
 }
 

@@ -1,18 +1,15 @@
 use std::{
-    env::current_dir,
     io::{BufReader, BufWriter, Write},
     net::TcpStream,
     process::exit,
 };
 
 use clap::{arg, command, value_parser, Command};
-use kvs::{
-    transport::{Request, Response},
-    KvStore, KvsError, Result,
-};
-use log::{debug, error, info};
+use kvs::{transport::Response, KvsError, Result};
+use kvs_protocol::request::Request;
+use kvs_protocol::serializer::serialize;
+use log::{debug, error};
 use serde::Deserialize;
-use serde_json::Deserializer;
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -75,7 +72,7 @@ fn main() -> Result<()> {
     let ip = matches.get_one::<String>("ip").unwrap();
     debug!("Trying to connect server on {}", ip);
     let read_stream = TcpStream::connect(ip)?;
-    let mut response_reader = BufReader::new(&read_stream);
+    let response_reader = BufReader::new(&read_stream);
 
     let write_stream = read_stream.try_clone()?;
     let mut request_writer = BufWriter::new(&write_stream);
@@ -86,17 +83,12 @@ fn main() -> Result<()> {
             let key = sub_m.get_one::<String>("key").unwrap();
             let val = sub_m.get_one::<String>("val").unwrap();
 
-            match serde_json::to_writer(
-                &mut request_writer,
-                &Request::Set {
-                    key: key.to_string(),
-                    val: val.to_string(),
-                },
-            ) {
-                Err(e) => error!("failed to serialize SET request, err: {}", e),
-                Ok(_) => debug!("serialized the SET request"),
-            };
+            let serialized_cmd = serialize(&Request::Set {
+                key: key.to_string(),
+                val: val.to_string(),
+            });
 
+            request_writer.write_all(serialized_cmd.as_bytes())?;
             request_writer.flush()?;
 
             Ok(())
@@ -104,53 +96,39 @@ fn main() -> Result<()> {
         Some(("get", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
 
-            match serde_json::to_writer(
-                &mut request_writer,
-                &Request::Get {
-                    key: key.to_string(),
-                },
-            ) {
-                Err(e) => error!("failed to serialize GET request, err: {}", e),
-                Ok(_) => debug!("serialized the GET request"),
-            };
+            let s = serialize(&Request::Get {
+                key: key.to_string(),
+            });
+            request_writer.write_all(s.as_bytes())?;
             request_writer.flush()?;
 
-            debug!("waiting to receive");
-            // It is expected that the input stream ends after the deserialized object.
-            // If the stream does not end, such as in the case of a persistent socket connection,
-            // this function will not return.
-            // It is possible instead to deserialize from a prefix of an input stream without
-            // looking for EOF by managing your own Deserializer.
-            // reference:
-            //  -   https://docs.rs/serde_json/latest/serde_json/fn.from_reader.html
-            //  -   https://github.com/serde-rs/json/issues/522
             let mut de = serde_json::Deserializer::from_reader(response_reader);
-            debug!("1");
             let resp = Response::deserialize(&mut de)?;
-
-            if let Some(e) = resp.Error {
-                eprintln!("Error: {}", e);
-                return Err(KvsError::JSONParser(e));
+            if let Some(e) = resp.error {
+                println!("Key not found");
+            } else {
+                println!("{}", resp.result);
             }
-
-            println!("{}", resp.Result);
 
             Ok(())
         }
         Some(("rm", sub_m)) => {
             let key = sub_m.get_one::<String>("key").unwrap();
 
-            match serde_json::to_writer(
-                &mut request_writer,
-                &Request::Rm {
-                    key: key.to_string(),
-                },
-            ) {
-                Err(e) => error!("failed to serialize RM request, err: {}", e),
-                Ok(_) => debug!("serialized the RM request"),
-            };
-
+            let s = serialize(&Request::Rm {
+                key: key.to_string(),
+            });
+            request_writer.write_all(s.as_bytes())?;
             request_writer.flush()?;
+
+            let mut de = serde_json::Deserializer::from_reader(response_reader);
+            let resp = Response::deserialize(&mut de)?;
+            if let Some(e) = resp.error {
+                eprintln!("{}", e);
+                return Err(KvsError::KeyNotFound);
+            } else {
+                println!("{}", resp.result);
+            }
 
             Ok(())
         }
