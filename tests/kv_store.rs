@@ -2,6 +2,43 @@ use kvs::{KvStore, Result};
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
+#[test]
+fn get_all() -> Result<()> {
+    let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    let mut store = KvStore::open(temp_dir.path())?;
+
+    store.set("key1".to_owned(), "value1".to_owned())?;
+    store.set("key2".to_owned(), "value2".to_owned())?;
+    store.set("key3".to_owned(), "value3".to_owned())?;
+    store.set("key1".to_owned(), "tmp".to_owned())?;
+
+    assert_eq!(store.get("key1".to_owned())?, Some("tmp".to_owned()));
+    assert_eq!(store.get("key2".to_owned())?, Some("value2".to_owned()));
+    assert_eq!(store.get("key3".to_owned())?, Some("value3".to_owned()));
+    let all = store.all();
+    assert_eq!(all.len(), 3);
+
+    // Open from disk again and check persistent data
+    drop(store);
+    let mut store = KvStore::open(temp_dir.path())?;
+    assert_eq!(store.get("key1".to_owned())?, Some("tmp".to_owned()));
+    assert_eq!(store.get("key2".to_owned())?, Some("value2".to_owned()));
+    assert_eq!(store.get("key3".to_owned())?, Some("value3".to_owned()));
+    let all = store.all();
+    assert_eq!(all.len(), 3);
+    store.remove("key3".to_owned())?;
+    let all = store.all();
+    assert_eq!(all.len(), 2);
+
+    // Open from disk again and check persistent data
+    drop(store);
+    let mut store = KvStore::open(temp_dir.path())?;
+    let all = store.all();
+    assert_eq!(all.len(), 2);
+
+    Ok(())
+}
+
 // Should get previously stored value
 #[test]
 fn get_stored_value() -> Result<()> {

@@ -6,9 +6,8 @@ use kvs_protocol::{
     request::Request,
     serializer::serialize,
 };
-use log::{debug, error};
+use log::error;
 use serde::{Deserialize, Serialize};
-use serde_json::Deserializer;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -16,7 +15,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    result, u32, vec,
+    result, u32,
 };
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
@@ -203,6 +202,32 @@ impl KvStore {
         }
 
         Ok(())
+    }
+
+    pub fn all(&mut self) -> Vec<Request> {
+        let mut result: Vec<Request> = Vec::new();
+
+        for key in self.key_dir.keys() {
+            let v = self.key_dir.get(key).unwrap();
+            let reader = self.readers.get_mut(&v.log_idx).unwrap();
+
+            reader.seek(SeekFrom::Start(v.starting_pos)).unwrap();
+            let mut cmd_reader = reader.take(v.len);
+
+            let mut buf_str = String::new();
+            match cmd_reader.read_to_string(&mut buf_str) {
+                Err(e) => error!("failed to read, {}", e),
+                Ok(_) => {}
+            };
+
+            if let Ok(Request::Set { key, val }) =
+                deserializer::deserialize::<Request>(&mut buf_str)
+            {
+                result.push(Request::Set { key, val })
+            }
+        }
+
+        return result;
     }
 
     /// get runs get

@@ -1,14 +1,13 @@
 use std::{
     io::{BufReader, BufWriter, Write},
     net::TcpStream,
-    process::exit,
 };
 
 use clap::{arg, command, value_parser, Command};
 use kvs::{transport::Response, KvsError, Result};
 use kvs_protocol::request::Request;
 use kvs_protocol::serializer::serialize;
-use log::{debug, error};
+use log::debug;
 use serde::Deserialize;
 
 fn main() -> Result<()> {
@@ -104,7 +103,7 @@ fn main() -> Result<()> {
 
             let mut de = serde_json::Deserializer::from_reader(response_reader);
             let resp = Response::deserialize(&mut de)?;
-            if let Some(e) = resp.error {
+            if let Some(_e) = resp.error {
                 println!("Key not found");
             } else {
                 println!("{}", resp.result);
@@ -126,8 +125,6 @@ fn main() -> Result<()> {
             if let Some(e) = resp.error {
                 eprintln!("{}", e);
                 return Err(KvsError::KeyNotFound);
-            } else {
-                println!("{}", resp.result);
             }
 
             Ok(())

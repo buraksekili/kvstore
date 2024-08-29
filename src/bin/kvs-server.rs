@@ -2,7 +2,7 @@ use std::env::current_dir;
 
 use clap::{arg, builder::PossibleValue, command, value_parser};
 use kvs::{server::KvServer, KvStore, Result};
-use log::{self, debug, warn};
+use log::{self, debug};
 
 fn main() -> Result<()> {
     env_logger::init();

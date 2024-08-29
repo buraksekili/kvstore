@@ -44,7 +44,7 @@ impl<E: KvEngine> KvServer<E> {
             _ => {}
         };
 
-        debug!("GOT request: {}", &buf);
+        debug!("received a client request: {}", &buf);
 
         match kvs_protocol::deserializer::deserialize::<kvs_protocol::request::Request>(
             buf.as_str(),
@@ -78,16 +78,18 @@ impl<E: KvEngine> KvServer<E> {
                         }
                     }
                     Request::Rm { key } => {
+                        let mut resp: Response = Response {
+                            ..Default::default()
+                        };
+
                         if let Err(e) = self.engine.remove(key.to_string()) {
-                            let mut resp: Response = Response {
-                                ..Default::default()
-                            };
+                            error!("failed to remove the key, err: {}", e);
 
-                            resp.error = Some(format!("Key not found, err: {}", e));
-
-                            serde_json::to_writer(&mut response_writer, &resp).unwrap();
-                            response_writer.flush().unwrap(); // TODO
+                            resp.error = Some("Key not found".to_string());
                         }
+
+                        serde_json::to_writer(&mut response_writer, &resp).unwrap();
+                        response_writer.flush().unwrap(); // TODO
                     }
                 }
             }
