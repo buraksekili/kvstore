@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, string::FromUtf8Error};
 
 use failure::Fail;
 
@@ -13,8 +13,15 @@ pub enum KvsError {
     #[fail(display = "{}", 0)]
     Parser(String),
 
+    #[fail(display = "sled error: {}", _0)]
+    Sled(#[cause] sled::Error),
+
     #[fail(display = "{}", 0)]
     IO(String),
+
+    /// Key or value is invalid UTF-8 sequence
+    #[fail(display = "UTF-8 error: {}", _0)]
+    Utf8(#[cause] FromUtf8Error),
 }
 
 impl From<serde_json::Error> for KvsError {
@@ -32,6 +39,18 @@ impl From<io::Error> for KvsError {
 impl From<kvs_protocol::error::Error> for KvsError {
     fn from(value: kvs_protocol::error::Error) -> Self {
         Self::Parser(value.to_string())
+    }
+}
+
+impl From<sled::Error> for KvsError {
+    fn from(err: sled::Error) -> KvsError {
+        KvsError::Sled(err)
+    }
+}
+
+impl From<FromUtf8Error> for KvsError {
+    fn from(err: FromUtf8Error) -> KvsError {
+        KvsError::Utf8(err)
     }
 }
 

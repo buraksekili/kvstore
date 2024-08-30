@@ -1,8 +1,8 @@
 use std::env::current_dir;
 
 use clap::{arg, builder::PossibleValue, command, value_parser};
-use kvs::{server::KvServer, KvStore, Result};
-use log::{self, info, LevelFilter};
+use kvs::{server::KvServer, KvStore, Result, SledKvsEngine};
+use log::{self, debug, info, LevelFilter};
 
 fn main() -> Result<()> {
     env_logger::builder().filter_level(LevelFilter::Info).init();
@@ -37,13 +37,25 @@ fn main() -> Result<()> {
 
     let ip = matches.get_one::<String>("ip").unwrap();
 
-    let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string());
+    let curr_engine = matches
+        .get_one::<String>("engine")
+        .expect("failed to parse --engine for server");
+    info!("current engine: {}", curr_engine);
 
-    if let Some(engine) = matches.get_one::<String>("engine") {
-        info!("current engine: {}", engine);
+    if curr_engine == "sled" {
+        debug!("using sled engine");
+        let server = KvServer::new(
+            SledKvsEngine::new(sled::open(current_dir()?)?),
+            ip.to_string(),
+        );
+
+        server.start()?;
+    } else {
+        debug!("using kvs engine");
+        let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string());
+
+        server.start()?;
     }
-
-    server.start()?;
 
     Ok(())
 }

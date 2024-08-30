@@ -8,5 +8,5 @@ pub mod transport;
 
 mod data_format;
 
-pub use engine::{KvStore, KvsEngine};
+pub use engine::{KvStore, KvsEngine, SledKvsEngine};
 pub use error::{KvsError, Result};
