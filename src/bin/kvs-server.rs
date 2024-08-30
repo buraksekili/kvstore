@@ -1,11 +1,19 @@
-use std::env::current_dir;
+use std::{
+    env::{self, current_dir},
+    fs,
+    process::exit,
+};
 
 use clap::{arg, builder::PossibleValue, command, value_parser};
 use kvs::{server::KvServer, KvStore, Result, SledKvsEngine};
-use log::{self, debug, info, LevelFilter};
+use log::{self, debug, error, info};
 
 fn main() -> Result<()> {
-    env_logger::builder().filter_level(LevelFilter::Info).init();
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "info")
+    }
+
+    env_logger::init();
 
     let matches = command!()
         .version(env!("CARGO_PKG_VERSION"))
@@ -41,6 +49,24 @@ fn main() -> Result<()> {
         .get_one::<String>("engine")
         .expect("failed to parse --engine for server");
     info!("current engine: {}", curr_engine);
+
+    // if there is an engine log file in the current directory, check if it aligns with
+    // the engine provided to the server. if there is a mismatch between them, return an
+    // error.
+    //
+    // Engine specified in 'engine' file must be the same as --engine flag value.
+    let engine_log = current_dir()?.join("engine");
+    if engine_log.exists() {
+        debug!("engine log exists");
+        let engine = fs::read_to_string(engine_log).expect("failed to read engine log file");
+        if engine != *curr_engine {
+            error!("Wrong engine!");
+            exit(1);
+        }
+    }
+
+    // write engine to engine file
+    fs::write(current_dir()?.join("engine"), format!("{}", curr_engine))?;
 
     if curr_engine == "sled" {
         debug!("using sled engine");
