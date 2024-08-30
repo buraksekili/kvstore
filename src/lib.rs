@@ -3,12 +3,10 @@ mod buf_reader;
 mod buf_writer;
 mod engine;
 mod error;
-mod kv;
 pub mod server;
 pub mod transport;
 
-pub use engine::KvsEngine;
 mod data_format;
 
+pub use engine::{KvStore, KvsEngine};
 pub use error::{KvsError, Result};
-pub use kv::KvStore;
