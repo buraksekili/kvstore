@@ -7,7 +7,7 @@ mod kv;
 pub mod server;
 pub mod transport;
 
-pub use engine::KvEngine;
+pub use engine::KvsEngine;
 mod data_format;
 
 pub use error::{KvsError, Result};

@@ -5,15 +5,15 @@ use std::{
 
 use log::{debug, error, info};
 
-use crate::{engine::KvEngine, transport::Response, Result};
+use crate::{engine::KvsEngine, transport::Response, Result};
 use kvs_protocol::request::Request;
 
-pub struct KvServer<E: KvEngine> {
+pub struct KvServer<E: KvsEngine> {
     engine: E,
     addr: String,
 }
 
-impl<E: KvEngine> KvServer<E> {
+impl<E: KvsEngine> KvServer<E> {
     pub fn new(engine: E, addr: String) -> KvServer<E> {
         KvServer { engine, addr }
     }

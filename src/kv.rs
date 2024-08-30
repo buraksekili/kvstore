@@ -1,5 +1,5 @@
 use crate::{
-    buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvEngine, KvsError, Result,
+    buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvsEngine, KvsError, Result,
 };
 use kvs_protocol::{
     deserializer::{self, deserialize as kvs_deserialize},
@@ -54,7 +54,7 @@ enum Command {
     Remove { key: String },
 }
 
-impl KvEngine for KvStore {
+impl KvsEngine for KvStore {
     fn set(&mut self, k: String, val: String) -> Result<()> {
         self.set(k, val)
     }
