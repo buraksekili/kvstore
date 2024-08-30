@@ -2,10 +2,10 @@ use std::env::current_dir;
 
 use clap::{arg, builder::PossibleValue, command, value_parser};
 use kvs::{server::KvServer, KvStore, Result};
-use log::{self, debug};
+use log::{self, info, LevelFilter};
 
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::builder().filter_level(LevelFilter::Info).init();
 
     let matches = command!()
         .version(env!("CARGO_PKG_VERSION"))
@@ -33,12 +33,14 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
+    info!("KV Store, version: {}", env!("CARGO_PKG_VERSION"));
+
     let ip = matches.get_one::<String>("ip").unwrap();
 
     let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string());
 
     if let Some(engine) = matches.get_one::<String>("engine") {
-        debug!("current engine: {}", engine);
+        info!("current engine: {}", engine);
     }
 
     server.start()?;

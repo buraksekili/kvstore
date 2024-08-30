@@ -21,7 +21,7 @@ impl<E: KvEngine> KvServer<E> {
     pub fn start(mut self) -> Result<()> {
         debug!("Trying to listen on {}", self.addr);
         let listener = TcpListener::bind(&self.addr)?;
-        debug!("Listening on: {}", self.addr);
+        info!("Listening on: {}", self.addr);
 
         for stream in listener.incoming() {
             match stream {
