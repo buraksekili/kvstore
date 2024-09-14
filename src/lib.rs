@@ -7,4 +7,4 @@ pub mod server;
 pub mod thread_pool;
 pub use engine::{KvStore, KvsEngine, SledKvsEngine};
 pub use error::{KvsError, Result};
-mod transport;
+pub mod transport;
