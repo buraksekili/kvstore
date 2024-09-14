@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap},
+    collections::BTreeMap,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
@@ -285,8 +285,7 @@ impl KvsEngine for KvStore {
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        // TODO: use writer to trigger remove function.
-        Ok(())
+        self.writer.lock().unwrap().remove(key)
     }
 }
 
