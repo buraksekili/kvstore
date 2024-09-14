@@ -1,75 +1,97 @@
 use crate::{
     buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvsEngine, KvsError, Result,
 };
+use crossbeam_skiplist::SkipMap;
 use kvs_protocol::{
-    deserializer::{self, deserialize as kvs_deserialize},
-    request::Request,
+    deserializer::deserialize as kvs_deserialize, parser::KvReqParser, request::Request,
     serializer::serialize,
 };
 use log::error;
 use serde::{Deserialize, Serialize};
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    cell::RefCell,
+    collections::{BTreeMap},
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    result, u32,
+    result,
+    sync::{Arc, Mutex},
+    u32,
 };
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
-/// KvStore implements in memory database.
-pub struct KvStore {
+// KvsWriter runs on a single thread
+pub struct KvsWriter {
     writer: BufWriterWithPos<File>,
-    // readers stores the reader of each log files as value, and the
-    // index of the logs as key.
-    readers: HashMap<u32, BufReaderWithPos<File>>,
-
-    // A map of keys to log pointers.
-    // We store each command's position in the log file.
-    // To find out which log file contains this key, you can check
-    // CommandPos's `log_idx` field.
-    key_dir: BTreeMap<String, CommandPos>,
-
     log_idx: u32,
-
-    // path refers to the directory path for the log files.
-    path: PathBuf,
-
     uncompacted: u64,
+    key_dir: Arc<SkipMap<String, CommandPos>>,
+    path: Arc<PathBuf>,
+    reader: KvsReader,
 }
 
-#[derive(Debug)]
-struct CommandPos {
-    log_idx: u32,
-    starting_pos: u64,
-    len: u64,
-}
+impl KvsWriter {
+    /// set runs set
+    pub fn set(&mut self, k: String, val: String) -> Result<()> {
+        let key = k.clone(); // todo: mixed up usage of k and key - need to do type alias one of them maybe?
+        let prev_pos = self.writer.pos;
 
-#[derive(Serialize, Deserialize, Debug)]
-enum Command {
-    Set { key: String, val: String },
-    Remove { key: String },
-}
+        // Write Set command to the log.
+        let c = Request::Set { key, val };
+        self.writer.write(serialize(&c).as_bytes())?;
+        self.writer.flush()?;
 
-impl KvsEngine for KvStore {
-    fn set(&mut self, k: String, val: String) -> Result<()> {
-        self.set(k, val)
+        // Now, update in-memory index file. Whenever clients want to read
+        // a key, we'll first go through the index map.
+        let cmd_pos = CommandPos {
+            log_idx: self.log_idx,
+            starting_pos: prev_pos,
+            len: self.writer.pos - prev_pos,
+        };
+
+        // if we have some here, it means that our map already contains the value.
+        // So, we can understand that our storage will include some duplicated
+        // data which can be uncompacted.
+        if let Some(old_cmd) = self.key_dir.get(&k) {
+            self.uncompacted += old_cmd.value().len;
+        }
+
+        self.key_dir.insert(k, cmd_pos);
+
+        if self.uncompacted > COMPACTION_THRESHOLD {
+            return self.compaction();
+        }
+
+        Ok(())
     }
 
-    fn get(&mut self, input_key: String) -> Result<Option<String>> {
-        self.get(input_key)
+    /// remove runs remove
+    pub fn remove(&mut self, key: String) -> Result<()> {
+        if !self.key_dir.contains_key(&key) {
+            return Err(KvsError::KeyNotFound);
+        }
+
+        let tmp_key: String = key.clone();
+
+        let c = Request::Rm { key };
+        let pos_before_writing = self.writer.pos;
+        self.writer.write(serialize(&c).as_bytes())?;
+        self.writer.flush()?;
+        let pos_after_writing = self.writer.pos;
+        self.uncompacted += pos_after_writing - pos_before_writing;
+
+        self.key_dir.remove(&tmp_key).unwrap();
+
+        if self.uncompacted > COMPACTION_THRESHOLD {
+            self.compaction()?;
+        }
+
+        Ok(())
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
-        self.remove(key)
-    }
-}
-
-/// KvStore implements in memory database.
-impl KvStore {
     // compaction runs merging of bitcask.
     // when uncompacted bytes amount reaches the threshold, the compaction will be run in next set command.
     //
@@ -110,43 +132,19 @@ impl KvStore {
 
         let mut new_starting_pos = 0 as u64;
         // iterate through the active keys on the memory.
-        for cmd_pos in &mut self.key_dir.values_mut() {
-            // get the reader of the log entry.
-            let reader = self
-                .readers
-                .get_mut(&cmd_pos.log_idx)
-                .expect("failed to find reader of the key");
+        for cmd_pos in self.key_dir.iter() {
+            let copied_bytes = self
+                .reader
+                .read_cmd_from_log_and_copy(&cmd_pos.value(), &mut new_log_writer)?;
 
-            // if the position of the reader is not pointing to the correct command in the log file,
-            // move it to the current position for the command.
-            // assume that you have multiple commands in a log file where duplication for keys may appear.
-            // for example, one log file may include "{set a 1}, {set b 2}, {set a 2}" where we have duplicated
-            // set command for key 'a' and the first one is redundant. based on this log, our memory only have
-            // one entry for key 'a' which has value 2. So, while reading this log, we must ensure that
-            // reader is point to the position where '{set a 2}' command belongs to instead of '{set a 1}' command.
-            // therefore, seek the offset to the correct starting point for the key here if it is not pointing
-            // to the correct place.
-            if reader.pos != cmd_pos.starting_pos {
-                reader.seek(SeekFrom::Start(cmd_pos.starting_pos))?;
-            }
-
-            // After moving the correct place in the file, now we need to copy the existing entry
-            // to the new log. In order to do that, we need to read `cmd_pos.len` many bytes from
-            // the reader and then copy the content of it to the new log writer.
-            let mut r = reader.take(cmd_pos.len);
-            let copied_bytes = io::copy(&mut r, &mut new_log_writer)?;
-
-            // after copying the entry to the new log, we must ensure that our in-memory reference
-            // to CommandPos (which includes details of each command in the log file) is up to date
-            // according to the latest changes.
-            *cmd_pos = CommandPos {
-                log_idx: new_compaction_log_idx,
-                starting_pos: new_starting_pos,
-                len: copied_bytes,
-            };
-
-            // as we wrote 'copied_bytes' many bytes to the new log file, we must move 'new_starting_pos'
-            // to 'copied_bytes' ahead.
+            self.key_dir.insert(
+                cmd_pos.key().clone(),
+                CommandPos {
+                    log_idx: new_compaction_log_idx,
+                    starting_pos: new_starting_pos,
+                    len: copied_bytes,
+                },
+            );
             new_starting_pos += copied_bytes;
         }
         new_log_writer.flush()?;
@@ -156,14 +154,13 @@ impl KvStore {
 
         // Do not directly delete from self.readers while reading it as it
         // will corrupt hash map structure.
-        for i in &self.readers {
-            stale_log_idx.push(*i.0);
+        for i in self.key_dir.iter() {
+            if i.value().log_idx < new_compaction_log_idx {
+                stale_log_idx.push(i.value().log_idx);
+            }
         }
-        println!("stale: {:?}", stale_log_idx);
 
         for i in &stale_log_idx {
-            println!("removing: {}", &i);
-            self.readers.remove(&i);
             fs::remove_file(self.path.join(format!("{}.log", i)))?;
         }
 
@@ -171,161 +168,171 @@ impl KvStore {
 
         Ok(())
     }
+}
 
-    /// set runs set
-    pub fn set(&mut self, k: String, val: String) -> Result<()> {
-        let key = k.clone();
-        let prev_pos = self.writer.pos;
+pub struct KvsReader {
+    path: Arc<PathBuf>,
+    // readers stores the reader of each log files as value, and the
+    // index of the logs as key.
+    // The primary reason for using RefCell here is to allow mutable access
+    // to the readers map even if the KvStoreReader itself is borrowed immutably
+    readers: RefCell<BTreeMap<u32, BufReaderWithPos<File>>>,
+    // In file systems and I/O operations, a "handle" typically refers to a reference or identifier for an open file or I/O resource.
+}
 
-        // Write Set command to the log.
-        let c = Request::Set { key, val };
-        self.writer.write(serialize(&c).as_bytes())?;
-        self.writer.flush()?;
+impl Clone for KvsReader {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            readers: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
 
-        // Now, update in-memory index file. Whenever clients want to read
-        // a key, we'll first go through the index map.
-        let cmd_pos = CommandPos {
-            log_idx: self.log_idx,
-            starting_pos: prev_pos,
-            len: self.writer.pos - prev_pos,
+impl KvsReader {
+    pub fn read_cmd_from_log_and_copy(
+        &self,
+        cmd_pos: &CommandPos,
+        writer: &mut BufWriterWithPos<File>,
+    ) -> Result<u64> {
+        let mut readers = self.readers.borrow_mut();
+
+        if !readers.contains_key(&cmd_pos.log_idx) {
+            let curr_file_path = self.path.join(format!("{}.log", cmd_pos.log_idx));
+            let reader = BufReaderWithPos::new(File::open(&curr_file_path)?)?;
+            readers.insert(cmd_pos.log_idx, reader);
+        }
+        let reader = readers.get_mut(&cmd_pos.log_idx).unwrap();
+
+        reader.seek(SeekFrom::Start(cmd_pos.starting_pos)).unwrap();
+        let mut cmd_reader = reader.take(cmd_pos.len);
+
+        let copied_bytes = io::copy(&mut cmd_reader, writer)?;
+        return Ok(copied_bytes);
+    }
+
+    pub fn read_cmd_from_log(&self, cmd_pos: &CommandPos) -> Result<Command> {
+        let mut readers = self.readers.borrow_mut();
+
+        if !readers.contains_key(&cmd_pos.log_idx) {
+            let curr_file_path = self.path.join(format!("{}.log", cmd_pos.log_idx));
+            let reader = BufReaderWithPos::new(File::open(&curr_file_path)?)?;
+            readers.insert(cmd_pos.log_idx, reader);
+        }
+        let reader = readers.get_mut(&cmd_pos.log_idx).unwrap();
+
+        reader.seek(SeekFrom::Start(cmd_pos.starting_pos)).unwrap();
+        let mut cmd_reader = reader.take(cmd_pos.len);
+
+        let mut buf_str = String::new();
+        match cmd_reader.read_to_string(&mut buf_str) {
+            Err(e) => error!("failed to read command, {}", e),
+            Ok(_) => {}
         };
 
-        // if we have some here, it means that our map already contains the value.
-        // So, we can understand that our storage will include some duplicated
-        // data which can be uncompacted.
-        if let Some(old_cmd) = self.key_dir.insert(k, cmd_pos) {
-            self.uncompacted += old_cmd.len;
+        if let Ok(c) = kvs_deserialize::<Command>(&mut buf_str) {
+            Ok(c)
+        } else {
+            Err(KvsError::Parser(buf_str))
         }
+    }
+}
 
-        if self.uncompacted > COMPACTION_THRESHOLD {
-            return self.compaction();
-        }
+/// KvStore implements in memory database.
+#[derive(Clone)]
+pub struct KvStore {
+    writer: Arc<Mutex<KvsWriter>>,
+    reader: KvsReader,
 
-        Ok(())
+    // A map of keys to log pointers.
+    // We store each command's position in the log file.
+    // To find out which log file contains this key, you can check
+    // CommandPos's `log_idx` field.
+    key_dir: Arc<SkipMap<String, CommandPos>>,
+
+    // path refers to the directory path for the log files.
+    path: Arc<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandPos {
+    log_idx: u32,
+    starting_pos: u64,
+    len: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum Command {
+    Set { key: String, val: String },
+    Remove { key: String },
+}
+
+impl KvsEngine for KvStore {
+    fn set(&self, k: String, val: String) -> Result<()> {
+        self.writer.lock().unwrap().set(k, val)
     }
 
-    pub fn all(&mut self) -> Vec<Request> {
-        let mut result: Vec<Request> = Vec::new();
-
-        for key in self.key_dir.keys() {
-            let v = self.key_dir.get(key).unwrap();
-            let reader = self.readers.get_mut(&v.log_idx).unwrap();
-
-            reader.seek(SeekFrom::Start(v.starting_pos)).unwrap();
-            let mut cmd_reader = reader.take(v.len);
-
-            let mut buf_str = String::new();
-            match cmd_reader.read_to_string(&mut buf_str) {
-                Err(e) => error!("failed to read, {}", e),
-                Ok(_) => {}
-            };
-
-            if let Ok(Request::Set { key, val }) =
-                deserializer::deserialize::<Request>(&mut buf_str)
-            {
-                result.push(Request::Set { key, val })
-            }
-        }
-
-        return result;
-    }
-
-    /// get runs get
-    pub fn get(&mut self, input_key: String) -> Result<Option<String>> {
-        let result = self.key_dir.get(&input_key).and_then(|pos| {
-            let reader = self.readers.get_mut(&pos.log_idx).unwrap();
-            // move file pointer to the position where our log starts.
-            reader.seek(SeekFrom::Start(pos.starting_pos)).unwrap();
-            // create a reader which reads `pos.len` many bytes from the log file.
-            let mut cmd_reader = reader.take(pos.len);
-
-            let mut buf_str = String::new();
-            match cmd_reader.read_to_string(&mut buf_str) {
-                Err(e) => error!("failed to read, {}", e),
-                Ok(_) => {}
-            };
-
-            if let Ok(Request::Set { key: _, val }) =
-                deserializer::deserialize::<Request>(&mut buf_str)
-            {
-                Some(val)
+    fn get(&self, key: String) -> Result<Option<String>> {
+        if let Some(cmd_pos) = self.key_dir.get(&key) {
+            if let Command::Set { val, .. } = self.reader.read_cmd_from_log(cmd_pos.value())? {
+                Ok(Some(val))
             } else {
-                None
+                Err(KvsError::KeyNotFound) // TODO: fix the error type, like unknown command
             }
-        });
-
-        if let Some(r) = result {
-            Ok(Some(r))
         } else {
             Ok(None)
         }
     }
 
-    /// remove runs remove
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        let tmp_key: String = key.clone();
-
-        let c = Request::Rm { key };
-        self.writer.write(serialize(&c).as_bytes())?;
-        self.writer.flush()?;
-
-        if let Some(_) = self.key_dir.remove(&tmp_key) {
-            Ok(())
-        } else {
-            Err(KvsError::KeyNotFound)
-        }
+    fn remove(&self, key: String) -> Result<()> {
+        // TODO: use writer to trigger remove function.
+        Ok(())
     }
+}
 
+/// KvStore implements in memory database.
+impl KvStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
         // copy the path
-        let p = path.into();
+        let path = Arc::new(path.into());
 
         // get all log files in the given path
-        let log_files = log_files(&p);
-        let mut index: BTreeMap<String, CommandPos> = BTreeMap::new();
+        let log_files = log_files(&path);
+        let mut readers: BTreeMap<u32, BufReaderWithPos<File>> = BTreeMap::new();
+        let key_dir = Arc::new(SkipMap::new());
 
-        let new_log_idx = log_files.last().unwrap_or(&0) + 1;
-        let new_log_file_name = format!("{}.log", new_log_idx);
-        let new_log_file_path = p.join(&new_log_file_name);
-
-        // read all log files, and save them in hash map.
-        let mut readers: HashMap<u32, BufReaderWithPos<File>> = HashMap::new();
         let mut uncompacted = 0 as u64;
         for lf_idx in &log_files {
-            let curr_file_path = p.join(format!("{}.log", lf_idx));
-            let mut reader = BufReaderWithPos::new(File::open(&curr_file_path)?)?;
+            let curr_log_path = path.join(format!("{}.log", lf_idx));
+            let mut reader = BufReaderWithPos::new(File::open(curr_log_path)?)?;
 
-            // build up our index tree.
-            // start reading from the beginning.
             let mut starting_pos = reader.seek(SeekFrom::Start(0))?;
-
             let mut buffer = Vec::new();
             reader.read_to_end(&mut buffer)?;
-
-            let mut parser = kvs_protocol::parser::KvReqParser::new(&buffer);
+            let mut parser = KvReqParser::new(&buffer);
 
             while let Some(v) = parser.next() {
                 let parsed_str = String::from_utf8_lossy(v);
-                let _cmd = kvs_deserialize::<Request>(&parsed_str);
+                let _cmd: result::Result<Request, kvs_protocol::error::Error> =
+                    kvs_deserialize::<Request>(&parsed_str);
 
                 if let Ok(cmd) = _cmd {
                     let read_so_far = parser.read_so_far() as u64;
                     match cmd {
                         Request::Set { key, val: _ } => {
-                            if let Some(old_cmd) = index.insert(
+                            let old_cmd = key_dir.insert(
                                 key,
                                 CommandPos {
                                     log_idx: *lf_idx,
                                     starting_pos,
                                     len: read_so_far - starting_pos,
                                 },
-                            ) {
-                                uncompacted += old_cmd.len;
-                            }
+                            );
+                            uncompacted += old_cmd.value().len;
                         }
                         Request::Rm { key } => {
-                            if let Some(old_cmd) = index.remove(&key) {
-                                uncompacted += old_cmd.len;
+                            if let Some(old_cmd) = key_dir.remove(&key) {
+                                uncompacted += old_cmd.value().len;
                             }
                         }
                         _ => {} // no logs for Get request.
@@ -337,6 +344,9 @@ impl KvStore {
             readers.insert(*lf_idx, reader);
         }
 
+        let new_log_file_idx = log_files.last().unwrap_or(&0) + 1;
+        let new_log_file_path = path.join(format!("{}.log", new_log_file_idx));
+
         // create a new log file.
         let new_log_writer: BufWriterWithPos<File> = BufWriterWithPos::new(
             OpenOptions::new()
@@ -345,18 +355,31 @@ impl KvStore {
                 .append(true)
                 .open(&new_log_file_path)?,
         )?;
+
         readers.insert(
-            new_log_idx,
+            new_log_file_idx,
             BufReaderWithPos::new(File::open(new_log_file_path)?)?,
         );
 
-        Ok(KvStore {
-            readers,
-            log_idx: new_log_idx,
-            key_dir: index,
+        let reader = KvsReader {
+            path: Arc::clone(&path),
+            readers: RefCell::new(readers),
+        };
+
+        let writer = KvsWriter {
             writer: new_log_writer,
-            path: p,
+            log_idx: new_log_file_idx,
             uncompacted,
+            key_dir: Arc::clone(&key_dir),
+            path: Arc::clone(&path),
+            reader: reader.clone(),
+        };
+
+        Ok(KvStore {
+            writer: Arc::new(Mutex::new(writer)),
+            reader,
+            key_dir,
+            path,
         })
     }
 }
