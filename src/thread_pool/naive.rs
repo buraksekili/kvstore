@@ -20,7 +20,8 @@ impl Worker {
             match queue.pop() {
                 Some(t) => t(),
                 None => {
-                    thread::sleep(Duration::from_millis(1200));
+                    // TODO: don't sleep here as it will cause missing jobs to receive.
+                    thread::sleep(Duration::from_millis(10));
                 }
             }
         });
