@@ -10,8 +10,11 @@ pub enum KvsError {
     #[fail(display = "Failed to read or create the log file")]
     LogInit,
 
-    #[fail(display = "{}", 0)]
+    #[fail(display = "Failed to parse {}", 0)]
     Parser(String),
+
+    #[fail(display = "Failed to deserialize {}, err: {}", 0, 1)]
+    KvsDeserializer(String, String),
 
     #[fail(display = "sled error: {}", _0)]
     Sled(#[cause] sled::Error),

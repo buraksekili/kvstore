@@ -3,8 +3,10 @@ use crate::{
 };
 use crossbeam_skiplist::SkipMap;
 use kvs_protocol::{
-    deserializer::deserialize as kvs_deserialize, parser::KvReqParser, request::Request,
-    serializer::serialize,
+    deserializer::deserialize as kvs_deserialize,
+    parser::KvReqParser,
+    request::Request,
+    serializer::{self, serialize as kvs_serialize},
 };
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -41,7 +43,7 @@ impl KvsWriter {
 
         // Write Set command to the log.
         let c = Request::Set { key, val };
-        self.writer.write(serialize(&c).as_bytes())?;
+        self.writer.write(kvs_serialize(&c).as_bytes())?;
         self.writer.flush()?;
 
         // Now, update in-memory index file. Whenever clients want to read
@@ -78,7 +80,7 @@ impl KvsWriter {
 
         let c = Request::Rm { key };
         let pos_before_writing = self.writer.pos;
-        self.writer.write(serialize(&c).as_bytes())?;
+        self.writer.write(kvs_serialize(&c).as_bytes())?;
         self.writer.flush()?;
         let pos_after_writing = self.writer.pos;
         self.uncompacted += pos_after_writing - pos_before_writing;
@@ -211,7 +213,7 @@ impl KvsReader {
         return Ok(copied_bytes);
     }
 
-    pub fn read_cmd_from_log(&self, cmd_pos: &CommandPos) -> Result<Command> {
+    pub fn read_cmd_from_log(&self, cmd_pos: &CommandPos) -> Result<Request> {
         let mut readers = self.readers.borrow_mut();
 
         if !readers.contains_key(&cmd_pos.log_idx) {
@@ -230,10 +232,9 @@ impl KvsReader {
             Ok(_) => {}
         };
 
-        if let Ok(c) = kvs_deserialize::<Command>(&mut buf_str) {
-            Ok(c)
-        } else {
-            Err(KvsError::Parser(buf_str))
+        match kvs_deserialize::<Request>(&mut buf_str) {
+            Ok(c) => Ok(c),
+            Err(e) => Err(KvsError::KvsDeserializer(buf_str, e.to_string())),
         }
     }
 }
@@ -274,7 +275,7 @@ impl KvsEngine for KvStore {
 
     fn get(&self, key: String) -> Result<Option<String>> {
         if let Some(cmd_pos) = self.key_dir.get(&key) {
-            if let Command::Set { val, .. } = self.reader.read_cmd_from_log(cmd_pos.value())? {
+            if let Request::Set { val, .. } = self.reader.read_cmd_from_log(cmd_pos.value())? {
                 Ok(Some(val))
             } else {
                 Err(KvsError::KeyNotFound) // TODO: fix the error type, like unknown command
