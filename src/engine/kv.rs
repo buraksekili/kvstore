@@ -3,13 +3,10 @@ use crate::{
 };
 use crossbeam_skiplist::SkipMap;
 use kvs_protocol::{
-    deserializer::deserialize as kvs_deserialize,
-    parser::KvReqParser,
-    request::Request,
-    serializer::{self, serialize as kvs_serialize},
+    deserializer::deserialize as kvs_deserialize, parser::KvReqParser, request::Request,
+    serializer::serialize as kvs_serialize,
 };
 use log::error;
-use serde::{Deserialize, Serialize};
 
 use std::{
     cell::RefCell,
@@ -247,16 +244,10 @@ pub struct KvStore {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CommandPos {
+pub struct CommandPos {
     log_idx: u32,
     starting_pos: u64,
     len: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-enum Command {
-    Set { key: String, val: String },
-    Remove { key: String },
 }
 
 impl KvsEngine for KvStore {
