@@ -151,6 +151,8 @@ impl KvsWriter {
         }
         new_log_writer.flush()?;
 
+        // todo: this is not efficient in case of big number of log files.
+        // it always starts iterating from 1 to the recent log file and tries to delete them all the time.
         for i in 1..new_compaction_log_idx {
             fs::remove_file(self.path.join(format!("{}.log", i)))?;
         }
