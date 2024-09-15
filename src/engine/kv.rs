@@ -6,7 +6,7 @@ use kvs_protocol::{
     deserializer::deserialize as kvs_deserialize, parser::KvReqParser, request::Request,
     serializer::serialize as kvs_serialize,
 };
-use log::error;
+use log::{error, info};
 
 use std::{
     cell::RefCell,
@@ -237,6 +237,8 @@ pub struct KvStore {
     // We store each command's position in the log file.
     // To find out which log file contains this key, you can check
     // CommandPos's `log_idx` field.
+    // SkipMap is an alternative to BTreeMap` which supports
+    /// concurrent access across multiple threads.
     key_dir: Arc<SkipMap<String, CommandPos>>,
 
     // path refers to the directory path for the log files.
@@ -320,9 +322,10 @@ impl KvStore {
                         _ => {} // no logs for Get request.
                     }
                     starting_pos = read_so_far;
+                } else {
+                    info!("failed to get Request");
                 }
             }
-
             readers.insert(*lf_idx, reader);
         }
 

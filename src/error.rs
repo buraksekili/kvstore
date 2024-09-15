@@ -22,6 +22,9 @@ pub enum KvsError {
     #[fail(display = "{}", 0)]
     IO(String),
 
+    #[fail(display = "failed to handle tcp request, err: {}", 0)]
+    TCP(String),
+
     /// Key or value is invalid UTF-8 sequence
     #[fail(display = "UTF-8 error: {}", _0)]
     Utf8(#[cause] FromUtf8Error),
