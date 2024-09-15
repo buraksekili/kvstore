@@ -151,18 +151,7 @@ impl KvsWriter {
         }
         new_log_writer.flush()?;
 
-        // Now, it is time to delete previous log files as their details already moved to the new log.
-        let mut stale_log_idx: Vec<u32> = Vec::new();
-
-        // Do not directly delete from self.readers while reading it as it
-        // will corrupt hash map structure.
-        for i in self.key_dir.iter() {
-            if i.value().log_idx < new_compaction_log_idx {
-                stale_log_idx.push(i.value().log_idx);
-            }
-        }
-
-        for i in &stale_log_idx {
+        for i in 1..new_compaction_log_idx {
             fs::remove_file(self.path.join(format!("{}.log", i)))?;
         }
 
