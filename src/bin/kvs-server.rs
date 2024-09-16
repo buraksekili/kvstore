@@ -68,6 +68,10 @@ fn main() -> Result<()> {
     // write engine to engine file
     fs::write(current_dir()?.join("engine"), format!("{}", curr_engine))?;
 
+    info!("kvs-server {}", env!("CARGO_PKG_VERSION"));
+    info!("Storage engine {}", curr_engine);
+    info!("Listening at {} ", ip.to_string());
+
     if curr_engine == "sled" {
         debug!("using sled engine");
         let server = KvServer::new(
