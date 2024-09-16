@@ -31,6 +31,10 @@ pub enum KvsError {
     /// Key or value is invalid UTF-8 sequence
     #[fail(display = "UTF-8 error: {}", _0)]
     Utf8(#[cause] FromUtf8Error),
+
+    /// Key or value is invalid UTF-8 sequence
+    #[fail(display = "Unexpected  {}", _0)]
+    UnexpectedCommandType(String),
 }
 
 impl From<serde_json::Error> for KvsError {

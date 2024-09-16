@@ -1,6 +1,7 @@
 use crate::{
     buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvsEngine, KvsError, Result,
 };
+use dashmap::DashMap;
 use kvs_protocol::{
     deserializer::deserialize as kvs_deserialize, parser::KvReqParser, request::Request,
     serializer::serialize as kvs_serialize,
@@ -33,7 +34,7 @@ pub struct KvsWriter {
     writer: BufWriterWithPos<File>,
     log_idx: u32,
     uncompacted: u64,
-    key_dir: Arc<Mutex<BTreeMap<String, CommandPos>>>,
+    key_dir: DashMap<String, CommandPos>,
     path: Arc<PathBuf>,
     reader: KvsReader,
 }
@@ -41,7 +42,6 @@ pub struct KvsWriter {
 impl KvsWriter {
     /// set runs set
     pub fn set(&mut self, k: String, val: String) -> Result<()> {
-        let mut key_dir = self.key_dir.lock().unwrap();
         let prev_pos = self.writer.pos;
 
         // Write Set command to the log.
@@ -60,17 +60,16 @@ impl KvsWriter {
             len: self.writer.pos - prev_pos,
         };
 
-        key_dir.insert(k.clone(), cmd_pos);
-
         // if we have some here, it means that our map already contains the value.
         // So, we can understand that our storage will include some duplicated
         // data which can be uncompacted.
-        if let Some(old_cmd) = key_dir.get(&k) {
+        if let Some(old_cmd) = self.key_dir.get(&k) {
             self.uncompacted += old_cmd.len;
         }
 
+        self.key_dir.insert(k.clone(), cmd_pos);
+
         if self.uncompacted > COMPACTION_THRESHOLD {
-            drop(key_dir);
             self.compaction()?;
         }
 
@@ -79,8 +78,7 @@ impl KvsWriter {
 
     /// remove runs remove
     pub fn remove(&mut self, key: String) -> Result<()> {
-        let mut key_dir = self.key_dir.lock().unwrap();
-        if !key_dir.contains_key(&key) {
+        if !self.key_dir.contains_key(&key) {
             return Err(KvsError::KeyNotFound);
         }
 
@@ -93,10 +91,9 @@ impl KvsWriter {
         let pos_after_writing = self.writer.pos;
         self.uncompacted += pos_after_writing - pos_before_writing;
 
-        key_dir.remove(&tmp_key).unwrap();
+        self.key_dir.remove(&tmp_key).unwrap();
 
         if self.uncompacted > COMPACTION_THRESHOLD {
-            drop(key_dir);
             self.compaction()?;
         }
 
@@ -111,7 +108,6 @@ impl KvsWriter {
     // will be the reflection of our in-memory key_dir map.
     // 2- after creating this new log file, it removes the previous log files.
     fn compaction(&mut self) -> Result<()> {
-        let mut key_dir = self.key_dir.lock().unwrap();
         // Create a new log file including all the commands stored in in-memory keydir map.
         let new_compaction_log_idx = self.log_idx + 1;
         let new_log_file_path = self.path.join(format!("{}.log", &new_compaction_log_idx));
@@ -144,16 +140,19 @@ impl KvsWriter {
 
         let mut new_starting_pos = 0 as u64;
         // iterate through the active keys on the memory.
-        for cmd_pos in key_dir.iter_mut() {
+        for entry in self.key_dir.iter() {
             let copied_bytes = self
                 .reader
-                .read_cmd_from_log_and_copy(&cmd_pos.1, &mut new_log_writer)?;
+                .read_cmd_from_log_and_copy(entry.value(), &mut new_log_writer)?;
 
-            *cmd_pos.1 = CommandPos {
-                log_idx: new_compaction_log_idx,
-                starting_pos: new_starting_pos,
-                len: copied_bytes,
-            };
+            self.key_dir.insert(
+                entry.key().to_owned(),
+                CommandPos {
+                    log_idx: new_compaction_log_idx,
+                    starting_pos: new_starting_pos,
+                    len: copied_bytes,
+                },
+            );
 
             new_starting_pos += copied_bytes;
         }
@@ -250,7 +249,7 @@ pub struct KvStore {
     // CommandPos's `log_idx` field.
     // SkipMap is an alternative to BTreeMap` which supports
     /// concurrent access across multiple threads.
-    key_dir: Arc<Mutex<BTreeMap<String, CommandPos>>>,
+    key_dir: DashMap<String, CommandPos>,
 
     // path refers to the directory path for the log files.
     path: Arc<PathBuf>,
@@ -258,16 +257,44 @@ pub struct KvStore {
 
 impl KvsEngine for KvStore {
     fn set(&self, k: String, val: String) -> Result<()> {
-        self.writer.lock().unwrap().set(k, val)
+        let mut writer = self.writer.lock().unwrap();
+        let prev_pos = writer.writer.pos;
+
+        let c = Request::Set {
+            key: k.clone(),
+            val: val.clone(),
+        };
+        writer.writer.write(kvs_serialize(&c).as_bytes())?;
+        writer.writer.flush()?;
+        self.key_dir
+            .entry(k)
+            .and_modify(|cmd_pos| {
+                writer.uncompacted += cmd_pos.len;
+                *cmd_pos = CommandPos {
+                    log_idx: writer.log_idx,
+                    starting_pos: prev_pos,
+                    len: writer.writer.pos - prev_pos,
+                };
+            })
+            .or_insert(CommandPos {
+                log_idx: writer.log_idx,
+                starting_pos: prev_pos,
+                len: writer.writer.pos - prev_pos,
+            });
+
+        if writer.uncompacted > COMPACTION_THRESHOLD {
+            writer.compaction()?;
+        }
+
+        Ok(())
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        let key_dir = self.key_dir.lock().unwrap();
-        if let Some(cmd_pos) = key_dir.get(&key) {
-            if let Request::Set { val, .. } = self.reader.read_cmd_from_log(cmd_pos)? {
-                Ok(Some(val))
-            } else {
-                Err(KvsError::KeyNotFound) // TODO: fix the error type, like unknown command
+        // Use DashMap's get method which combines the check and retrieval atomically
+        if let Some(cmd_pos) = self.key_dir.get(&key) {
+            match self.reader.read_cmd_from_log(cmd_pos.value())? {
+                Request::Set { val, .. } => Ok(Some(val)),
+                _ => Err(KvsError::UnexpectedCommandType(cmd_pos.key().to_owned())),
             }
         } else {
             Ok(None)
@@ -275,7 +302,27 @@ impl KvsEngine for KvStore {
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        self.writer.lock().unwrap().remove(key)
+        let mut writer = self.writer.lock().unwrap();
+
+        // Use DashMap's remove method which returns the removed value
+        if let Some((_, old_cmd)) = self.key_dir.remove(&key) {
+            writer.uncompacted += old_cmd.len;
+
+            let c = Request::Rm { key };
+            let pos_before_writing = writer.writer.pos;
+            writer.writer.write(kvs_serialize(&c).as_bytes())?;
+            writer.writer.flush()?;
+            let pos_after_writing = writer.writer.pos;
+            writer.uncompacted += pos_after_writing - pos_before_writing;
+
+            if writer.uncompacted > COMPACTION_THRESHOLD {
+                writer.compaction()?;
+            }
+
+            Ok(())
+        } else {
+            Err(KvsError::KeyNotFound)
+        }
     }
 }
 
@@ -288,9 +335,7 @@ impl KvStore {
         // get all log files in the given path
         let log_files = log_files(&path);
         let mut readers: BTreeMap<u32, BufReaderWithPos<File>> = BTreeMap::new();
-        let key_dir: Arc<Mutex<BTreeMap<String, CommandPos>>> =
-            Arc::new(Mutex::new(BTreeMap::new()));
-        let mut kd = key_dir.lock().unwrap();
+        let key_dir = DashMap::new();
 
         let mut uncompacted = 0 as u64;
         for lf_idx in &log_files {
@@ -311,7 +356,7 @@ impl KvStore {
                     let read_so_far = parser.read_so_far() as u64;
                     match cmd {
                         Request::Set { key, val: _ } => {
-                            if let Some(old_cmd) = kd.insert(
+                            if let Some(old_cmd) = key_dir.insert(
                                 key,
                                 CommandPos {
                                     log_idx: *lf_idx,
@@ -323,8 +368,8 @@ impl KvStore {
                             }
                         }
                         Request::Rm { key } => {
-                            if let Some(old_cmd) = kd.remove(&key) {
-                                uncompacted += old_cmd.len;
+                            if let Some(old_cmd) = key_dir.remove(&key) {
+                                uncompacted += old_cmd.1.len;
                             }
                         }
                         _ => {} // no logs for Get request.
@@ -336,8 +381,6 @@ impl KvStore {
             }
             readers.insert(*lf_idx, reader);
         }
-
-        drop(kd);
 
         let new_log_file_idx = log_files.last().unwrap_or(&0) + 1;
         let new_log_file_path = path.join(format!("{}.log", new_log_file_idx));
@@ -365,7 +408,7 @@ impl KvStore {
             writer: new_log_writer,
             log_idx: new_log_file_idx,
             uncompacted,
-            key_dir: Arc::clone(&key_dir),
+            key_dir: key_dir.clone(),
             path: Arc::clone(&path),
             reader: reader.clone(),
         };
