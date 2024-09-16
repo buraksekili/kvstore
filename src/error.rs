@@ -22,6 +22,9 @@ pub enum KvsError {
     #[fail(display = "{}", 0)]
     IO(String),
 
+    #[fail(display = "")]
+    Pooling,
+
     #[fail(display = "failed to handle tcp request, err: {}", 0)]
     TCP(String),
 
