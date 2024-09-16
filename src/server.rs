@@ -11,7 +11,7 @@ use crate::{
     transport::Response,
     Result,
 };
-use kvs_protocol::request::Request;
+use kvs_protocol::{deserializer::deserialize, request::Request};
 
 pub struct KvServer<E: KvsEngine, P: ThreadPool> {
     engine: E,
@@ -22,7 +22,7 @@ pub struct KvServer<E: KvsEngine, P: ThreadPool> {
 impl<E: KvsEngine> KvServer<E, NaiveThreadPool> {
     pub fn new(engine: E, addr: String) -> KvServer<E, NaiveThreadPool> {
         let thread_pool =
-            NaiveThreadPool::new(32).expect("failed to create thread pool for the database");
+            NaiveThreadPool::new(4).expect("failed to create thread pool for the database");
         KvServer {
             engine,
             addr,
@@ -59,12 +59,11 @@ where
 
     // TODO: error handling in the read_line
     let mut buf = String::new();
-    match request_reader.read_line(&mut buf) {
-        Err(e) => error!("failed to read, err: {}", e),
-        _ => {}
-    };
+    if let Err(err) = request_reader.read_line(&mut buf) {
+        return Err(crate::KvsError::TCP(err.to_string()));
+    }
 
-    match kvs_protocol::deserializer::deserialize::<kvs_protocol::request::Request>(buf.as_str()) {
+    match deserialize::<Request>(buf.as_str()) {
         Err(e) => {
             error!("failed to deserialize the request, err: {}", e);
             Err(crate::KvsError::TCP(e.to_string()))
