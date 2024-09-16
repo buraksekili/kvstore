@@ -48,7 +48,6 @@ fn main() -> Result<()> {
     let curr_engine = matches
         .get_one::<String>("engine")
         .expect("failed to parse --engine for server");
-    info!("current engine: {}", curr_engine);
 
     // if there is an engine log file in the current directory, check if it aligns with
     // the engine provided to the server. if there is a mismatch between them, return an
@@ -68,6 +67,7 @@ fn main() -> Result<()> {
     // write engine to engine file
     fs::write(current_dir()?.join("engine"), format!("{}", curr_engine))?;
 
+    debug!("DEBUGGING ENABLED");
     info!("kvs-server {}", env!("CARGO_PKG_VERSION"));
     info!("Storage engine {}", curr_engine);
     info!("Listening at {} ", ip.to_string());

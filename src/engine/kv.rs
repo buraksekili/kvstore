@@ -1,7 +1,6 @@
 use crate::{
     buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvsEngine, KvsError, Result,
 };
-use crossbeam_skiplist::SkipMap;
 use kvs_protocol::{
     deserializer::deserialize as kvs_deserialize, parser::KvReqParser, request::Request,
     serializer::serialize as kvs_serialize,
@@ -17,17 +16,24 @@ use std::{
     path::{Path, PathBuf},
     result,
     sync::{Arc, Mutex},
-    u32,
+    thread, u32,
 };
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub struct CommandPos {
+    log_idx: u32,
+    starting_pos: u64,
+    len: u64,
+}
 
 // KvsWriter runs on a single thread
 pub struct KvsWriter {
     writer: BufWriterWithPos<File>,
     log_idx: u32,
     uncompacted: u64,
-    key_dir: Arc<SkipMap<String, CommandPos>>,
+    key_dir: Arc<Mutex<BTreeMap<String, CommandPos>>>,
     path: Arc<PathBuf>,
     reader: KvsReader,
 }
@@ -35,11 +41,14 @@ pub struct KvsWriter {
 impl KvsWriter {
     /// set runs set
     pub fn set(&mut self, k: String, val: String) -> Result<()> {
-        let key = k.clone(); // todo: mixed up usage of k and key - need to do type alias one of them maybe?
+        let mut key_dir = self.key_dir.lock().unwrap();
         let prev_pos = self.writer.pos;
 
         // Write Set command to the log.
-        let c = Request::Set { key, val };
+        let c = Request::Set {
+            key: k.clone(),
+            val,
+        };
         self.writer.write(kvs_serialize(&c).as_bytes())?;
         self.writer.flush()?;
 
@@ -51,17 +60,18 @@ impl KvsWriter {
             len: self.writer.pos - prev_pos,
         };
 
+        key_dir.insert(k.clone(), cmd_pos);
+
         // if we have some here, it means that our map already contains the value.
         // So, we can understand that our storage will include some duplicated
         // data which can be uncompacted.
-        if let Some(old_cmd) = self.key_dir.get(&k) {
-            self.uncompacted += old_cmd.value().len;
+        if let Some(old_cmd) = key_dir.get(&k) {
+            self.uncompacted += old_cmd.len;
         }
 
-        self.key_dir.insert(k, cmd_pos);
-
         if self.uncompacted > COMPACTION_THRESHOLD {
-            return self.compaction();
+            drop(key_dir);
+            self.compaction()?;
         }
 
         Ok(())
@@ -69,7 +79,8 @@ impl KvsWriter {
 
     /// remove runs remove
     pub fn remove(&mut self, key: String) -> Result<()> {
-        if !self.key_dir.contains_key(&key) {
+        let mut key_dir = self.key_dir.lock().unwrap();
+        if !key_dir.contains_key(&key) {
             return Err(KvsError::KeyNotFound);
         }
 
@@ -82,9 +93,10 @@ impl KvsWriter {
         let pos_after_writing = self.writer.pos;
         self.uncompacted += pos_after_writing - pos_before_writing;
 
-        self.key_dir.remove(&tmp_key).unwrap();
+        key_dir.remove(&tmp_key).unwrap();
 
         if self.uncompacted > COMPACTION_THRESHOLD {
+            drop(key_dir);
             self.compaction()?;
         }
 
@@ -99,6 +111,7 @@ impl KvsWriter {
     // will be the reflection of our in-memory key_dir map.
     // 2- after creating this new log file, it removes the previous log files.
     fn compaction(&mut self) -> Result<()> {
+        let mut key_dir = self.key_dir.lock().unwrap();
         // Create a new log file including all the commands stored in in-memory keydir map.
         let new_compaction_log_idx = self.log_idx + 1;
         let new_log_file_path = self.path.join(format!("{}.log", &new_compaction_log_idx));
@@ -131,19 +144,17 @@ impl KvsWriter {
 
         let mut new_starting_pos = 0 as u64;
         // iterate through the active keys on the memory.
-        for cmd_pos in self.key_dir.iter() {
+        for cmd_pos in key_dir.iter_mut() {
             let copied_bytes = self
                 .reader
-                .read_cmd_from_log_and_copy(&cmd_pos.value(), &mut new_log_writer)?;
+                .read_cmd_from_log_and_copy(&cmd_pos.1, &mut new_log_writer)?;
 
-            self.key_dir.insert(
-                cmd_pos.key().clone(),
-                CommandPos {
-                    log_idx: new_compaction_log_idx,
-                    starting_pos: new_starting_pos,
-                    len: copied_bytes,
-                },
-            );
+            *cmd_pos.1 = CommandPos {
+                log_idx: new_compaction_log_idx,
+                starting_pos: new_starting_pos,
+                len: copied_bytes,
+            };
+
             new_starting_pos += copied_bytes;
         }
         new_log_writer.flush()?;
@@ -239,17 +250,10 @@ pub struct KvStore {
     // CommandPos's `log_idx` field.
     // SkipMap is an alternative to BTreeMap` which supports
     /// concurrent access across multiple threads.
-    key_dir: Arc<SkipMap<String, CommandPos>>,
+    key_dir: Arc<Mutex<BTreeMap<String, CommandPos>>>,
 
     // path refers to the directory path for the log files.
     path: Arc<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct CommandPos {
-    log_idx: u32,
-    starting_pos: u64,
-    len: u64,
 }
 
 impl KvsEngine for KvStore {
@@ -258,8 +262,9 @@ impl KvsEngine for KvStore {
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        if let Some(cmd_pos) = self.key_dir.get(&key) {
-            if let Request::Set { val, .. } = self.reader.read_cmd_from_log(cmd_pos.value())? {
+        let key_dir = self.key_dir.lock().unwrap();
+        if let Some(cmd_pos) = key_dir.get(&key) {
+            if let Request::Set { val, .. } = self.reader.read_cmd_from_log(cmd_pos)? {
                 Ok(Some(val))
             } else {
                 Err(KvsError::KeyNotFound) // TODO: fix the error type, like unknown command
@@ -283,7 +288,9 @@ impl KvStore {
         // get all log files in the given path
         let log_files = log_files(&path);
         let mut readers: BTreeMap<u32, BufReaderWithPos<File>> = BTreeMap::new();
-        let key_dir = Arc::new(SkipMap::new());
+        let key_dir: Arc<Mutex<BTreeMap<String, CommandPos>>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let mut kd = key_dir.lock().unwrap();
 
         let mut uncompacted = 0 as u64;
         for lf_idx in &log_files {
@@ -304,19 +311,20 @@ impl KvStore {
                     let read_so_far = parser.read_so_far() as u64;
                     match cmd {
                         Request::Set { key, val: _ } => {
-                            let old_cmd = key_dir.insert(
+                            if let Some(old_cmd) = kd.insert(
                                 key,
                                 CommandPos {
                                     log_idx: *lf_idx,
                                     starting_pos,
                                     len: read_so_far - starting_pos,
                                 },
-                            );
-                            uncompacted += old_cmd.value().len;
+                            ) {
+                                uncompacted += old_cmd.len;
+                            }
                         }
                         Request::Rm { key } => {
-                            if let Some(old_cmd) = key_dir.remove(&key) {
-                                uncompacted += old_cmd.value().len;
+                            if let Some(old_cmd) = kd.remove(&key) {
+                                uncompacted += old_cmd.len;
                             }
                         }
                         _ => {} // no logs for Get request.
@@ -328,6 +336,8 @@ impl KvStore {
             }
             readers.insert(*lf_idx, reader);
         }
+
+        drop(kd);
 
         let new_log_file_idx = log_files.last().unwrap_or(&0) + 1;
         let new_log_file_path = path.join(format!("{}.log", new_log_file_idx));

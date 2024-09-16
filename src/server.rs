@@ -54,6 +54,7 @@ fn handle_client_req<E>(engine: E, stream: std::net::TcpStream) -> Result<()>
 where
     E: KvsEngine,
 {
+    info!("==> New request!");
     let mut request_reader = BufReader::new(stream.try_clone().unwrap());
     let mut response_writer = BufWriter::new(stream);
 
@@ -71,6 +72,7 @@ where
         Ok(req) => {
             match &req {
                 Request::Get { key } => {
+                    info!("==> GET request {} ", key);
                     if let Ok(v) = engine.get(key.to_string()) {
                         let mut resp: Response = Response {
                             ..Default::default()
@@ -80,6 +82,7 @@ where
                         } else {
                             resp.error = Some("Key not found".to_string());
                         }
+                        info!("==> DONE GET request {} -> {:?}", key, resp);
 
                         serde_json::to_writer(&mut response_writer, &resp).unwrap();
                         response_writer.flush().unwrap(); // TODO
@@ -87,13 +90,20 @@ where
                         info!("no response:");
                     }
                 }
-                Request::Set { key, val } => match engine.set(key.to_string(), val.to_string()) {
-                    Ok(_) => {
-                        debug!("key: '{}' with value: '{}' inserted succesfully", key, val)
+                Request::Set { key, val } => {
+                    info!("==> SET request {} {} ", key, val);
+
+                    match engine.set(key.to_string(), val.to_string()) {
+                        Ok(_) => {
+                            debug!("key: '{}' with value: '{}' inserted succesfully", key, val)
+                        }
+                        Err(e) => error!("failed to write key: '{}', err: {}", key, e),
                     }
-                    Err(e) => error!("failed to write key: '{}', err: {}", key, e),
-                },
+                    info!("==> DONE SET request {} {} ", key, val);
+                }
                 Request::Rm { key } => {
+                    info!("==> RM request {} ", key);
+
                     let mut resp: Response = Response {
                         ..Default::default()
                     };
@@ -104,6 +114,7 @@ where
                         resp.error = Some("Key not found".to_string());
                     }
 
+                    info!("==> DONE RM request {} ", key);
                     serde_json::to_writer(&mut response_writer, &resp).unwrap();
                     response_writer.flush().unwrap(); // TODO
                 }

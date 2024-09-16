@@ -214,9 +214,14 @@ fn cli_wrong_engine() {
 
 fn cli_access_server(engine: &str, addr: &str) {
     let (sender, receiver) = mpsc::sync_channel(0);
+    let mut level = "debug";
+    if engine == "sled" {
+        level = "off"
+    }
     let temp_dir = TempDir::new().unwrap();
     let mut server = Command::cargo_bin("kvs-server").unwrap();
     let mut child = server
+        .env("RUST_LOG", level)
         .args(&["--engine", engine, "--addr", addr])
         .current_dir(&temp_dir)
         .spawn()
@@ -328,7 +333,7 @@ fn cli_access_server(engine: &str, addr: &str) {
 
 #[test]
 fn cli_access_server_kvs_engine() {
-    cli_access_server("kvs", "127.0.0.1:4004");
+    cli_access_server("kvs", "127.0.0.1:4234");
 }
 
 #[test]
