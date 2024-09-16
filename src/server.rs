@@ -5,12 +5,7 @@ use std::{
 
 use log::{debug, error, info};
 
-use crate::{
-    engine::KvsEngine,
-    thread_pool::{NaiveThreadPool, ThreadPool},
-    transport::Response,
-    Result,
-};
+use crate::{engine::KvsEngine, thread_pool::ThreadPool, transport::Response, Result};
 use kvs_protocol::{deserializer::deserialize, request::Request};
 
 pub struct KvServer<E: KvsEngine, P: ThreadPool> {
@@ -19,19 +14,15 @@ pub struct KvServer<E: KvsEngine, P: ThreadPool> {
     thread_pool: P,
 }
 
-impl<E: KvsEngine> KvServer<E, NaiveThreadPool> {
-    pub fn new(engine: E, addr: String) -> KvServer<E, NaiveThreadPool> {
-        let thread_pool =
-            NaiveThreadPool::new(4).expect("failed to create thread pool for the database");
+impl<E: KvsEngine, P: ThreadPool> KvServer<E, P> {
+    pub fn new(engine: E, addr: String, thread_pool: P) -> KvServer<E, P> {
         KvServer {
             engine,
             addr,
             thread_pool,
         }
     }
-}
 
-impl<E: KvsEngine, P: ThreadPool> KvServer<E, P> {
     pub fn start(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.addr)?;
         for stream in listener.incoming() {

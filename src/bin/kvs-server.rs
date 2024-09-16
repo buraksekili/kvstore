@@ -5,7 +5,11 @@ use std::{
 };
 
 use clap::{arg, builder::PossibleValue, command, value_parser};
-use kvs::{server::KvServer, KvStore, Result, SledKvsEngine};
+use kvs::{
+    server::KvServer,
+    thread_pool::{SharedQueueThreadPool, ThreadPool},
+    KvStore, Result, SledKvsEngine,
+};
 use log::{self, debug, error, info};
 
 fn main() -> Result<()> {
@@ -72,17 +76,19 @@ fn main() -> Result<()> {
     info!("Storage engine {}", curr_engine);
     info!("Listening at {} ", ip.to_string());
 
+    let pool = SharedQueueThreadPool::new(48).unwrap();
     if curr_engine == "sled" {
         debug!("using sled engine");
         let server = KvServer::new(
             SledKvsEngine::new(sled::open(current_dir()?)?),
             ip.to_string(),
+            pool,
         );
 
         server.start()?;
     } else {
         debug!("using kvs engine");
-        let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string());
+        let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string(), pool);
 
         server.start()?;
     }

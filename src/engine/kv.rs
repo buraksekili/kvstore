@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     result,
     sync::{Arc, Mutex},
-    thread, u32,
+    u32,
 };
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;

@@ -124,6 +124,10 @@ impl NaiveThreadPool {
         // Step 1: Signal all workers to stop
         self.running.store(false, Ordering::SeqCst);
 
+        for _ in &self.workers {
+            self.job_queue.push(Job::Shutdown);
+        }
+
         // Step 2: Wake up all waiting threads
         let (lock, cvar) = &*self.job_signal;
         match lock.try_lock() {
