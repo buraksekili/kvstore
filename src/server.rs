@@ -1,9 +1,10 @@
 use std::{
+    borrow::Borrow,
     cell::RefCell,
     collections::BTreeMap,
     env::current_dir,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{self, BufRead, BufReader, BufWriter, Write},
     net::TcpListener,
     path::PathBuf,
     sync::{
@@ -56,6 +57,7 @@ impl<E: KvsEngine> KvServer<E> {
 pub struct MyKvServer {
     pub engine: KvStore,
     rx_compaction: Receiver<TxMessage>,
+    path: PathBuf,
 }
 
 pub struct TxMessage {
@@ -67,11 +69,13 @@ impl MyKvServer {
     pub fn new() -> MyKvServer {
         let (tx_compaction, rx_compaction) = unbounded::<TxMessage>();
 
-        let engine = KvStore::new(tx_compaction.clone(), current_dir().unwrap()).unwrap();
+        let p = current_dir().unwrap();
+        let engine = KvStore::new(tx_compaction.clone(), p.clone()).unwrap();
 
         MyKvServer {
             engine: engine.to_owned(),
             rx_compaction,
+            path: p,
         }
     }
 
@@ -82,6 +86,11 @@ impl MyKvServer {
         let log_writer = Arc::clone(&self.engine.log_writer);
         let key_dir = self.engine.key_dir.clone();
         let uncompacted = Arc::clone(&self.engine.uncompacted);
+
+        let mut reader = KvsReader {
+            path: self.path.clone(),
+            readers: RefCell::new(BTreeMap::new()),
+        };
 
         let r: JoinHandle<Result<()>> = thread::spawn(move || loop {
             println!("[receiver]: waiting for a signal");
@@ -110,10 +119,6 @@ impl MyKvServer {
                 )?;
 
                 let mut new_starting_pos = 0 as u64;
-                let reader = KvsReader {
-                    path: path.clone(),
-                    readers: RefCell::new(BTreeMap::new()),
-                };
 
                 info!("=====> COPYING OLD LOGS");
                 // iterate through the active keys on the memory.
@@ -133,11 +138,45 @@ impl MyKvServer {
                 compaction_log_writer.flush()?;
                 info!("=====> COPYING OLD LOGS DONE");
 
+                let keys_to_delete: Vec<u32> = {
+                    let borrowed_map = reader.readers.borrow();
+                    borrowed_map
+                        .iter()
+                        .filter_map(|(&key, reader)| {
+                            // Your condition for deletion goes here
+                            // For example, let's say we want to delete readers at position 0
+                            if key < new_compaction_log_idx as u32 {
+                                Some(key)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
+
+                {
+                    let mut borrowed_map = reader.readers.borrow_mut();
+                    for key in keys_to_delete {
+                        borrowed_map.remove(&key);
+                        println!("Removed reader with key: {}", key);
+                    }
+                }
+
                 info!("DELETING OLD LOGS, LEN {}", new_compaction_log_idx);
                 // todo: this is not efficient in case of big number of log files.
                 // it always starts iterating from 1 to the recent log file and tries to delete them all the time.
-                for i in 1..new_compaction_log_idx {
-                    fs::remove_file(path.join(format!("{}.log", i)))?;
+                for i in 1..new_compaction_log_idx as u32 {
+                    info!("trying to delete old log file {} from from fs done\n", i);
+                    fs::remove_file(path.join(format!("{}.log", i))).or_else(|e| {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            info!("log file {} is not found", i);
+                            Ok(())
+                        } else {
+                            info!("Failed to delete log file {}, err: {}", i, e);
+                            Err(e)
+                        }
+                    })?;
+                    info!("deleting old log file {} from from fs done\n", i);
                 }
                 info!("=====> DELETING OLD LOGS");
 
