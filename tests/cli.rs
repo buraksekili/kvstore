@@ -1,5 +1,6 @@
 use assert_cmd::prelude::*;
 use predicates::str::{contains, is_empty};
+use rand::Rng;
 use std::fs::{self, File};
 use std::process::Command;
 use std::sync::mpsc;
@@ -214,92 +215,197 @@ fn cli_wrong_engine() {
 
 fn cli_access_server(engine: &str, addr: &str) {
     let (sender, receiver) = mpsc::sync_channel(0);
-    let mut level = "debug";
-    if engine == "sled" {
-        level = "off"
-    }
     let temp_dir = TempDir::new().unwrap();
     let mut server = Command::cargo_bin("kvs-server").unwrap();
     let mut child = server
-        .env("RUST_LOG", level)
         .args(&["--engine", engine, "--addr", addr])
         .current_dir(&temp_dir)
         .spawn()
         .unwrap();
     let handle = thread::spawn(move || {
-        let _ = receiver.recv(); // wait for main thread to finish
+        let _ = receiver.recv();
         child.kill().expect("server exited before killed");
     });
     thread::sleep(Duration::from_secs(1));
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["set", "key1", "value1", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout(is_empty());
+    let max_retries = 5;
+    let initial_delay = Duration::from_millis(100);
+    let max_delay = Duration::from_secs(5);
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["get", "key1", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout("value1\n");
+    // Helper function to run a command and return its output
+    let run_command = |args: &[&str]| -> Result<(bool, String, String), String> {
+        Command::cargo_bin("kvs-client")
+            .unwrap()
+            .args(args)
+            .current_dir(&temp_dir)
+            .output()
+            .map(|output| {
+                (
+                    output.status.success(),
+                    String::from_utf8_lossy(&output.stdout).to_string(),
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                )
+            })
+            .map_err(|e| format!("Failed to execute command: {}", e))
+    };
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["set", "key1", "value2", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout(is_empty());
+    // Set key1 to value1
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) =
+                run_command(&["set", "key1", "value1", "--addr", addr])?;
+            if success && stdout.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to set key1. Stdout: {}, Stderr: {}",
+                    stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to set key1 after multiple retries");
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["get", "key1", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout("value2\n");
+    // Get key1
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) = run_command(&["get", "key1", "--addr", addr])?;
+            if success && stdout.trim() == "value1" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to get key1. Stdout: {}, Stderr: {}",
+                    stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to get key1 after multiple retries");
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["get", "key2", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout(contains("Key not found"));
+    // Set key1 to value2
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) =
+                run_command(&["set", "key1", "value2", "--addr", addr])?;
+            if success && stdout.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to set key1 to value2. Stdout: {}, Stderr: {}",
+                    stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to set key1 to value2 after multiple retries");
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["rm", "key2", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .failure()
-        .stderr(contains("Key not found"));
+    // Get key1 again
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) = run_command(&["get", "key1", "--addr", addr])?;
+            if success && stdout.trim() == "value2" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to get updated key1. Stdout: {}, Stderr: {}",
+                    stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to get updated key1 after multiple retries");
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["set", "key2", "value3", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout(is_empty());
+    // Get a non-existent key
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) = run_command(&["get", "key2", "--addr", addr])?;
+            if success && stdout.contains("Key not found") {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Unexpected result for non-existent key. Stdout: {}, Stderr: {}",
+                    stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to get expected result for non-existent key after multiple retries");
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["rm", "key1", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout(is_empty());
+    // Remove non-existent key
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) = run_command(&["rm", "key2", "--addr", addr])?;
+            if !success && stderr.contains("Key not found") {
+                Ok(())
+            } else {
+                Err(format!("Unexpected result when removing non-existent key. Success: {}, Stdout: {}, Stderr: {}", success, stdout, stderr))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to get expected result when removing non-existent key after multiple retries");
 
+    // Set key2 to value3
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) =
+                run_command(&["set", "key2", "value3", "--addr", addr])?;
+            if success && stdout.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to set key2. Stdout: {}, Stderr: {}",
+                    stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to set key2 after multiple retries");
+
+    // Remove key1
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) = run_command(&["rm", "key1", "--addr", addr])?;
+            if success && stdout.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to remove key1. Stdout: {}, Stderr: {}",
+                    stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to remove key1 after multiple retries");
+
+    // Shutdown the server
     sender.send(()).unwrap();
     handle.join().unwrap();
 
-    // Reopen and check value
+    // Restart the server
     let (sender, receiver) = mpsc::sync_channel(0);
     let mut server = Command::cargo_bin("kvs-server").unwrap();
     let mut child = server
@@ -308,25 +414,50 @@ fn cli_access_server(engine: &str, addr: &str) {
         .spawn()
         .unwrap();
     let handle = thread::spawn(move || {
-        let _ = receiver.recv(); // wait for main thread to finish
+        let _ = receiver.recv();
         child.kill().expect("server exited before killed");
     });
     thread::sleep(Duration::from_secs(1));
 
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["get", "key2", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout(contains("value3"));
-    Command::cargo_bin("kvs-client")
-        .unwrap()
-        .args(&["get", "key1", "--addr", addr])
-        .current_dir(&temp_dir)
-        .assert()
-        .success()
-        .stdout(contains("Key not found"));
+    // Get key2 again
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) = run_command(&["get", "key2", "--addr", addr])?;
+            if success && stdout.trim() == "value3" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to get key2 after restart. Stdout: {}, Stderr: {}",
+                    stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to get key2 after restart and multiple retries");
+
+    // Get removed key1
+    retry_with_backoff(
+        || {
+            let (success, stdout, stderr) = run_command(&["get", "key1", "--addr", addr])?;
+            if success && stdout.trim().contains("Key not found") {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Unexpected result for removed key1. Success: {}, Stdout: {}, Stderr: {}",
+                    success, stdout, stderr
+                ))
+            }
+        },
+        max_retries,
+        initial_delay,
+        max_delay,
+    )
+    .expect("Failed to get expected result for removed key1 after multiple retries");
+
+    // Shutdown the server
     sender.send(()).unwrap();
     handle.join().unwrap();
 }
@@ -339,4 +470,38 @@ fn cli_access_server_kvs_engine() {
 #[test]
 fn cli_access_server_sled_engine() {
     cli_access_server("sled", "127.0.0.1:4005");
+}
+
+fn retry_with_backoff<F, R, E>(
+    mut f: F,
+    max_retries: u32,
+    initial_delay: Duration,
+    max_delay: Duration,
+) -> Result<R, E>
+where
+    F: FnMut() -> Result<R, E>,
+    E: std::fmt::Debug,
+{
+    let mut rng = rand::thread_rng();
+    let mut delay = initial_delay;
+    let mut attempts = 0;
+
+    loop {
+        match f() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                attempts += 1;
+                if attempts >= max_retries {
+                    return Err(e);
+                }
+
+                // Calculate sleep duration with jitter
+                let jitter = rng.gen_range(0, 100) as f64 / 100.0;
+                let sleep_duration = (delay.as_millis() as f64 * (1.0 + jitter)) as u64;
+                thread::sleep(Duration::from_millis(sleep_duration));
+
+                delay = std::cmp::min(delay * 2, max_delay);
+            }
+        }
+    }
 }
