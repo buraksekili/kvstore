@@ -2,7 +2,9 @@ use crate::Result;
 
 mod kv;
 mod sled;
+pub use self::kv::CommandPos;
 pub use self::kv::KvStore;
+pub use self::kv::KvsReader;
 pub use self::sled::SledKvsEngine;
 
 pub trait KvsEngine: Clone + Send + 'static {

@@ -1,8 +1,11 @@
 use std::{
-    panic::{self, AssertUnwindSafe}, sync::{
+    panic::{self, AssertUnwindSafe},
+    sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex,
-    }, thread::{self, panicking}, time::{Duration, Instant}
+    },
+    thread::{self, panicking},
+    time::{Duration, Instant},
 };
 
 use super::ThreadPool;
@@ -179,9 +182,6 @@ impl SharedQueueThreadPool {
 
 impl Drop for SharedQueueThreadPool {
     fn drop(&mut self) {
-        if thread::panicking() {
-            debug_assert_eq!("a", "b");
-        }
         if !self.workers.is_empty() {
             let _ = self.shutdown(Duration::from_secs(2));
         }

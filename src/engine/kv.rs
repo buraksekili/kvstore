@@ -1,6 +1,8 @@
 use crate::{
-    buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, KvsEngine, KvsError, Result,
+    buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, server::TxMessage, KvsEngine,
+    KvsError, Result,
 };
+use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 use kvs_protocol::{
     deserializer::deserialize as kvs_deserialize, parser::KvReqParser, request::Request,
@@ -9,13 +11,17 @@ use kvs_protocol::{
 use log::info;
 
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     result,
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, RwLock,
+    },
     u32,
 };
 
@@ -23,9 +29,9 @@ const COMPACTION_THRESHOLD: u64 = 20;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommandPos {
-    log_idx: u32,
-    starting_pos: u64,
-    len: u64,
+    pub log_idx: u32,
+    pub starting_pos: u64,
+    pub len: u64,
 }
 
 // KvsWriter runs on a single thread
@@ -69,17 +75,20 @@ impl Compactor {
         let mut new_starting_pos = 0 as u64;
         info!("=====> COPYING OLD LOGS");
         // iterate through the active keys on the memory.
-        for mut entry in self.key_dir.iter_mut() {
+        let new_key_dir = DashMap::new();
+        for entry in self.key_dir.iter_mut() {
             let copied_bytes = self
                 .reader
                 .read_cmd_from_log_and_copy(entry.value(), &mut compaction_log_writer)?;
 
-            let v = entry.value_mut();
-            *v = CommandPos {
-                log_idx: new_compaction_log_idx,
-                starting_pos: new_starting_pos,
-                len: copied_bytes,
-            };
+            new_key_dir.insert(
+                entry.key().to_owned(),
+                CommandPos {
+                    log_idx: new_compaction_log_idx,
+                    starting_pos: new_starting_pos,
+                    len: copied_bytes,
+                },
+            );
 
             new_starting_pos += copied_bytes;
         }
@@ -112,12 +121,12 @@ impl Compactor {
 }
 
 pub struct KvsReader {
-    path: Arc<PathBuf>,
+    pub path: PathBuf,
     // readers stores the reader of each log files as value, and the
     // index of the logs as key.
     // The primary reason for using RefCell here is to allow mutable access
     // to the readers map even if the KvStoreReader itself is borrowed immutably
-    readers: Arc<RwLock<BTreeMap<u32, BufReaderWithPos<File>>>>,
+    pub readers: RefCell<BTreeMap<u32, BufReaderWithPos<File>>>,
     // In file systems and I/O operations, a "handle" typically refers to a reference or identifier for an open file or I/O resource.
 }
 
@@ -125,25 +134,18 @@ impl Clone for KvsReader {
     fn clone(&self) -> Self {
         Self {
             path: self.path.clone(),
-            readers: self.readers.clone(),
+            readers: RefCell::new(BTreeMap::new()),
         }
     }
 }
 
 impl KvsReader {
-    pub fn new(path: Arc<PathBuf>) -> Self {
-        KvsReader {
-            path,
-            readers: Arc::new(RwLock::new(BTreeMap::new())),
-        }
-    }
-
     pub fn read_cmd_from_log_and_copy(
         &self,
         cmd_pos: &CommandPos,
         writer: &mut BufWriterWithPos<File>,
     ) -> Result<u64> {
-        let mut readers = self.readers.write().unwrap();
+        let mut readers = self.readers.borrow_mut();
 
         if !readers.contains_key(&cmd_pos.log_idx) {
             let curr_file_path = self.path.join(format!("{}.log", cmd_pos.log_idx));
@@ -160,7 +162,7 @@ impl KvsReader {
     }
 
     pub fn read_cmd_from_log(&self, cmd_pos: &CommandPos) -> Result<Request> {
-        let mut readers = self.readers.write().unwrap();
+        let mut readers = self.readers.borrow_mut();
 
         if !readers.contains_key(&cmd_pos.log_idx) {
             let curr_file_path = self.path.join(format!("{}.log", cmd_pos.log_idx));
@@ -183,16 +185,23 @@ impl KvsReader {
 /// KvStore implements in memory database.
 #[derive(Clone)]
 pub struct KvStore {
-    writer: Arc<RwLock<BufWriterWithPos<File>>>,
-    log_idx: u32,
-    key_dir: Arc<DashMap<String, CommandPos>>,
-    reader: Arc<KvsReader>,
-    compactor: Arc<RwLock<Compactor>>,
+    // I can't read while someone is writing because compaction may happen
+    // which might invalidate current read by deleting a file for instance?
+    //
+    // PROBLEM: During compaction, i can't access the logs which prevents read access
+    // from functioning?
+    pub log_writer: Arc<Mutex<BufWriterWithPos<File>>>,
+    pub tx_compaction: Option<Sender<TxMessage>>,
+    pub log_idx: Arc<AtomicU64>,
+    pub key_dir: Arc<DashMap<String, CommandPos>>,
+    pub uncompacted: Arc<RwLock<u64>>,
+    reader: KvsReader,
+    path: PathBuf,
 }
 
 impl KvsEngine for KvStore {
     fn set(&self, k: String, val: String) -> Result<()> {
-        let mut writer = self.writer.write().unwrap();
+        let mut writer = self.log_writer.lock().unwrap();
         let prev_pos = writer.pos;
 
         let c = Request::Set {
@@ -206,7 +215,7 @@ impl KvsEngine for KvStore {
         let old_cmd_len = if let Some(old_cmd) = self.key_dir.insert(
             k,
             CommandPos {
-                log_idx: self.log_idx,
+                log_idx: self.log_idx.load(Ordering::SeqCst) as u32,
                 starting_pos: prev_pos,
                 len: writer.pos - prev_pos,
             },
@@ -219,14 +228,19 @@ impl KvsEngine for KvStore {
 
         // Update uncompacted outside of key_dir lock
         if old_cmd_len > 0 {
-            let mut compactor = self.compactor.write().unwrap();
-            compactor.uncompacted += old_cmd_len;
+            let mut uncompacted = self.uncompacted.write().unwrap();
+            *uncompacted += old_cmd_len;
         }
 
-        if self.compactor.read().unwrap().uncompacted > COMPACTION_THRESHOLD {
-            let mut writer = self.writer.write().unwrap();
-            let mut compactor = self.compactor.write().unwrap();
-            compactor.compaction(&mut *writer)?;
+        if *self.uncompacted.read().unwrap() > COMPACTION_THRESHOLD {
+            if let Some(sender) = &self.tx_compaction {
+                sender
+                    .send(TxMessage {
+                        log_idx: Arc::clone(&self.log_idx),
+                        path: self.path.to_owned(),
+                    })
+                    .unwrap();
+            }
         }
 
         Ok(())
@@ -246,7 +260,7 @@ impl KvsEngine for KvStore {
     fn remove(&self, key: String) -> Result<()> {
         // Use DashMap's remove method which returns the removed value
         if let Some((_, old_cmd)) = self.key_dir.remove(&key) {
-            let mut buf_writer = self.writer.write().unwrap();
+            let mut buf_writer = self.log_writer.lock().unwrap();
             let c = Request::Rm { key };
             let pos_before_writing = buf_writer.pos;
             buf_writer.writer.write(kvs_serialize(&c).as_bytes())?;
@@ -255,13 +269,17 @@ impl KvsEngine for KvStore {
             drop(buf_writer);
 
             {
-                let mut compactor = self.compactor.write().unwrap();
-                compactor.uncompacted += pos_after_writing - pos_before_writing;
-                compactor.uncompacted += old_cmd.len;
-
-                if compactor.uncompacted > COMPACTION_THRESHOLD {
-                    let mut buf_writer = self.writer.write().unwrap();
-                    compactor.compaction(&mut *buf_writer)?;
+                let mut uncompacted = self.uncompacted.write().unwrap();
+                *uncompacted += pos_after_writing - pos_before_writing;
+                *uncompacted += old_cmd.len;
+            }
+            if *self.uncompacted.read().unwrap() > COMPACTION_THRESHOLD {
+                if let Some(tx) = &self.tx_compaction {
+                    tx.send(TxMessage {
+                        log_idx: Arc::clone(&self.log_idx),
+                        path: self.path.to_owned(),
+                    })
+                    .unwrap();
                 }
             }
 
@@ -274,17 +292,24 @@ impl KvsEngine for KvStore {
 
 /// KvStore implements in memory database.
 impl KvStore {
+    pub fn new(tx_compaction: Sender<TxMessage>, path: impl Into<PathBuf>) -> Result<KvStore> {
+        let mut store = KvStore::open(path)?;
+        if store.tx_compaction.is_none() {
+            store.tx_compaction.replace(tx_compaction);
+        }
+
+        Ok(store)
+    }
+
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
-        // copy the path
-        let path = Arc::new(path.into());
+        let path: PathBuf = path.into();
 
         // get all log files in the given path
         let log_files = log_files(&path);
-        let reader = Arc::new(KvsReader::new(Arc::clone(&path)));
+
         let key_dir = Arc::new(DashMap::new());
 
         let mut temp_readers = BTreeMap::new();
-
         let mut uncompacted = 0 as u64;
         for lf_idx in &log_files {
             let curr_log_path = path.join(format!("{}.log", lf_idx));
@@ -331,6 +356,7 @@ impl KvStore {
         }
 
         let new_log_file_idx = log_files.last().unwrap_or(&0) + 1;
+        let log_idx = AtomicU64::new(new_log_file_idx as u64);
         let new_log_file_path = path.join(format!("{}.log", new_log_file_idx));
 
         // create a new log file.
@@ -341,39 +367,26 @@ impl KvStore {
                 .append(true)
                 .open(&new_log_file_path)?,
         )?;
-        let compaction_log: BufWriterWithPos<File> = BufWriterWithPos::new(
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(true)
-                .open(&new_log_file_path)?,
-        )?;
-
         temp_readers.insert(
             new_log_file_idx,
             BufReaderWithPos::new(File::open(new_log_file_path)?)?,
         );
 
-        // Update the KvsReader's readers map with the temporary map
-        {
-            let mut readers = reader.readers.write().unwrap();
-            *readers = temp_readers;
-        }
+        let reader = KvsReader {
+            path: path.clone(),
+            readers: RefCell::new(temp_readers),
+        };
 
-        let active_log_writer = Arc::new(RwLock::new(new_log_writer));
+        let active_log_writer = Arc::new(Mutex::new(new_log_writer));
 
         Ok(KvStore {
-            writer: Arc::clone(&active_log_writer),
-            reader: Arc::clone(&reader),
+            uncompacted: Arc::new(RwLock::new(uncompacted)),
+            log_writer: Arc::clone(&active_log_writer),
+            path,
+            reader,
             key_dir: Arc::clone(&key_dir),
-            log_idx: new_log_file_idx,
-            compactor: Arc::new(RwLock::new(Compactor {
-                log_idx: new_log_file_idx,
-                uncompacted,
-                key_dir: Arc::clone(&key_dir),
-                path: Arc::clone(&path),
-                reader: Arc::clone(&reader),
-            })),
+            log_idx: Arc::new(log_idx),
+            tx_compaction: None,
         })
     }
 }

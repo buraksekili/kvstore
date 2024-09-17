@@ -82,15 +82,14 @@ fn main() -> Result<()> {
         let server = KvServer::new(
             SledKvsEngine::new(sled::open(current_dir()?)?),
             ip.to_string(),
-            pool,
         );
 
-        server.start()?;
+        server.start(pool)?;
     } else {
         debug!("using kvs engine");
-        let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string(), pool);
+        let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string());
 
-        server.start()?;
+        server.start(pool)?;
     }
 
     Ok(())
