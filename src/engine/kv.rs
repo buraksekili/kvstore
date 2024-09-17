@@ -9,7 +9,6 @@ use kvs_protocol::{
 use log::info;
 
 use std::{
-    borrow::BorrowMut,
     collections::BTreeMap,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
@@ -31,7 +30,6 @@ pub struct CommandPos {
 
 // KvsWriter runs on a single thread
 pub struct Compactor {
-    writer: Arc<RwLock<BufWriterWithPos<File>>>, // todo, no need to use same file handler??
     log_idx: u32,
     uncompacted: u64,
     key_dir: Arc<DashMap<String, CommandPos>>,
@@ -47,7 +45,7 @@ impl Compactor {
     // active at the moment (which means active in key_dir hash map). Therefore, the new log entry
     // will be the reflection of our in-memory key_dir map.
     // 2- after creating this new log file, it removes the previous log files.
-    fn compaction(&mut self) -> Result<()> {
+    fn compaction(&mut self, writer: &mut BufWriterWithPos<File>) -> Result<()> {
         // Create a new log file including all the commands stored in in-memory keydir map.
         // So, it will be our new starting idx for logs.
         // All logs up to `self.log_idx + 1` will be included in to `new_log_file_path`.
@@ -69,7 +67,7 @@ impl Compactor {
         )?;
 
         let mut new_starting_pos = 0 as u64;
-        info!("running");
+        info!("=====> COPYING OLD LOGS");
         // iterate through the active keys on the memory.
         for mut entry in self.key_dir.iter_mut() {
             let copied_bytes = self
@@ -86,6 +84,7 @@ impl Compactor {
             new_starting_pos += copied_bytes;
         }
         compaction_log_writer.flush()?;
+        info!("=====> COPYING OLD LOGS DONE");
 
         // todo: this is not efficient in case of big number of log files.
         // it always starts iterating from 1 to the recent log file and tries to delete them all the time.
@@ -93,21 +92,18 @@ impl Compactor {
             fs::remove_file(self.path.join(format!("{}.log", i)))?;
         }
 
-        {
-            // self.log_idx + 1 corresponds to the new log file which will include all active
-            // commands in the memory. So, the new requests need to be moved to self.log_idx + 2
-            // which will be new log entry in the file system.
-            self.log_idx += 2;
-            // now, update the writer so that the new log entries will be written into a new log file.
-            let mut writer = self.writer.write().unwrap();
-            *writer = BufWriterWithPos::new(
-                OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open(self.path.join(format!("{}.log", self.log_idx)))?,
-            )?;
-            info!("[compaction]: writer of the compaction is updated! the new commands will be appended into the log idx: {}", self.log_idx);
-        }
+        // self.log_idx + 1 corresponds to the new log file which will include all active
+        // commands in the memory. So, the new requests need to be moved to self.log_idx + 2
+        // which will be new log entry in the file system.
+        self.log_idx += 2;
+        // now, update the writer so that the new log entries will be written into a new log file.
+        *writer = BufWriterWithPos::new(
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(self.path.join(format!("{}.log", self.log_idx)))?,
+        )?;
+        info!("[compaction]: writer of the compaction is updated! the new commands will be appended into the log idx: {}", self.log_idx);
 
         self.uncompacted = 0;
 
@@ -219,6 +215,7 @@ impl KvsEngine for KvStore {
         } else {
             0
         };
+        drop(writer);
 
         // Update uncompacted outside of key_dir lock
         if old_cmd_len > 0 {
@@ -227,15 +224,15 @@ impl KvsEngine for KvStore {
         }
 
         if self.compactor.read().unwrap().uncompacted > COMPACTION_THRESHOLD {
+            let mut writer = self.writer.write().unwrap();
             let mut compactor = self.compactor.write().unwrap();
-            compactor.compaction()?;
+            compactor.compaction(&mut *writer)?;
         }
 
         Ok(())
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        // Use DashMap's get method which combines the check and retrieval atomically
         if let Some(cmd_pos) = self.key_dir.get(&key) {
             match self.reader.read_cmd_from_log(cmd_pos.value())? {
                 Request::Set { val, .. } => Ok(Some(val)),
@@ -247,15 +244,15 @@ impl KvsEngine for KvStore {
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        let mut buf_writer = self.writer.write().unwrap();
-
         // Use DashMap's remove method which returns the removed value
         if let Some((_, old_cmd)) = self.key_dir.remove(&key) {
+            let mut buf_writer = self.writer.write().unwrap();
             let c = Request::Rm { key };
             let pos_before_writing = buf_writer.pos;
             buf_writer.writer.write(kvs_serialize(&c).as_bytes())?;
             buf_writer.writer.flush()?;
             let pos_after_writing = buf_writer.pos;
+            drop(buf_writer);
 
             {
                 let mut compactor = self.compactor.write().unwrap();
@@ -263,7 +260,8 @@ impl KvsEngine for KvStore {
                 compactor.uncompacted += old_cmd.len;
 
                 if compactor.uncompacted > COMPACTION_THRESHOLD {
-                    compactor.compaction()?;
+                    let mut buf_writer = self.writer.write().unwrap();
+                    compactor.compaction(&mut *buf_writer)?;
                 }
             }
 
@@ -375,7 +373,6 @@ impl KvStore {
                 key_dir: Arc::clone(&key_dir),
                 path: Arc::clone(&path),
                 reader: Arc::clone(&reader),
-                writer: Arc::clone(&active_log_writer),
             })),
         })
     }
