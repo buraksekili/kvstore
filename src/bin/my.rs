@@ -1,7 +1,7 @@
 use std::env::{self};
 
 use kvs::{
-    server::MyKvServer,
+    server::KvServer,
     thread_pool::{SharedQueueThreadPool, ThreadPool},
     Result,
 };
@@ -19,7 +19,7 @@ fn main() -> Result<()> {
 
     let pool = SharedQueueThreadPool::new(48).unwrap();
 
-    let s = MyKvServer::new();
+    let s = KvServer::new();
     s.start("127.0.0.1:4000".to_string(), pool)?;
 
     Ok(())

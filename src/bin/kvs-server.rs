@@ -77,20 +77,9 @@ fn main() -> Result<()> {
     info!("Listening at {} ", ip.to_string());
 
     let pool = SharedQueueThreadPool::new(48).unwrap();
-    if curr_engine == "sled" {
-        debug!("using sled engine");
-        let server = KvServer::new(
-            SledKvsEngine::new(sled::open(current_dir()?)?),
-            ip.to_string(),
-        );
 
-        server.start(pool)?;
-    } else {
-        debug!("using kvs engine");
-        let server = KvServer::new(KvStore::open(current_dir()?)?, ip.to_string());
-
-        server.start(pool)?;
-    }
+    let s = KvServer::new();
+    s.start(ip.to_string(), pool)?;
 
     Ok(())
 }

@@ -2,7 +2,7 @@ use crate::{
     buf_reader::BufReaderWithPos, buf_writer::BufWriterWithPos, server::TxMessage, KvsEngine,
     KvsError, Result,
 };
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Sender;
 use dashmap::DashMap;
 use kvs_protocol::{
     deserializer::deserialize as kvs_deserialize, parser::KvReqParser, request::Request,
@@ -25,99 +25,13 @@ use std::{
     u32,
 };
 
-const COMPACTION_THRESHOLD: u64 = 20;
+const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommandPos {
     pub log_idx: u32,
     pub starting_pos: u64,
     pub len: u64,
-}
-
-// KvsWriter runs on a single thread
-pub struct Compactor {
-    log_idx: u32,
-    uncompacted: u64,
-    key_dir: Arc<DashMap<String, CommandPos>>,
-    path: Arc<PathBuf>,
-    reader: Arc<KvsReader>,
-}
-
-impl Compactor {
-    // compaction runs merging of bitcask.
-    // when uncompacted bytes amount reaches the threshold, the compaction will be run in next set command.
-    //
-    // 1- it first creates a new log entry which will copy entries from previous logs that are
-    // active at the moment (which means active in key_dir hash map). Therefore, the new log entry
-    // will be the reflection of our in-memory key_dir map.
-    // 2- after creating this new log file, it removes the previous log files.
-    fn compaction(&mut self, writer: &mut BufWriterWithPos<File>) -> Result<()> {
-        // Create a new log file including all the commands stored in in-memory keydir map.
-        // So, it will be our new starting idx for logs.
-        // All logs up to `self.log_idx + 1` will be included in to `new_log_file_path`.
-        let new_compaction_log_idx = self.log_idx + 1;
-        let new_log_file_path = self.path.join(format!("{}.log", &new_compaction_log_idx));
-
-        println!(
-            "[compaction]: new compaction log file idx {}, compaction file name {:?}",
-            new_compaction_log_idx, new_log_file_path
-        );
-
-        // create a writer for the log entry which will include the command details of the
-        // existing commands on the memory.
-        let mut compaction_log_writer: BufWriterWithPos<File> = BufWriterWithPos::new(
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(&new_log_file_path)?,
-        )?;
-
-        let mut new_starting_pos = 0 as u64;
-        info!("=====> COPYING OLD LOGS");
-        // iterate through the active keys on the memory.
-        let new_key_dir = DashMap::new();
-        for entry in self.key_dir.iter_mut() {
-            let copied_bytes = self
-                .reader
-                .read_cmd_from_log_and_copy(entry.value(), &mut compaction_log_writer)?;
-
-            new_key_dir.insert(
-                entry.key().to_owned(),
-                CommandPos {
-                    log_idx: new_compaction_log_idx,
-                    starting_pos: new_starting_pos,
-                    len: copied_bytes,
-                },
-            );
-
-            new_starting_pos += copied_bytes;
-        }
-        compaction_log_writer.flush()?;
-        info!("=====> COPYING OLD LOGS DONE");
-
-        // todo: this is not efficient in case of big number of log files.
-        // it always starts iterating from 1 to the recent log file and tries to delete them all the time.
-        for i in 1..new_compaction_log_idx {
-            fs::remove_file(self.path.join(format!("{}.log", i)))?;
-        }
-
-        // self.log_idx + 1 corresponds to the new log file which will include all active
-        // commands in the memory. So, the new requests need to be moved to self.log_idx + 2
-        // which will be new log entry in the file system.
-        self.log_idx += 2;
-        // now, update the writer so that the new log entries will be written into a new log file.
-        *writer = BufWriterWithPos::new(
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(self.path.join(format!("{}.log", self.log_idx)))?,
-        )?;
-        info!("[compaction]: writer of the compaction is updated! the new commands will be appended into the log idx: {}", self.log_idx);
-
-        self.uncompacted = 0;
-
-        Ok(())
-    }
 }
 
 pub struct KvsReader {

@@ -1,5 +1,4 @@
 use std::{
-    borrow::Borrow,
     cell::RefCell,
     collections::BTreeMap,
     env::current_dir,
@@ -26,35 +25,7 @@ use crate::{
 };
 use kvs_protocol::{deserializer::deserialize, request::Request};
 
-pub struct KvServer<E: KvsEngine> {
-    engine: E,
-    addr: String,
-}
-
-impl<E: KvsEngine> KvServer<E> {
-    pub fn new(engine: E, addr: String) -> KvServer<E> {
-        KvServer { engine, addr }
-    }
-
-    pub fn start<P: ThreadPool>(&self, thread_pool: P) -> Result<()> {
-        let listener = TcpListener::bind(&self.addr)?;
-        for stream in listener.incoming() {
-            let engine = self.engine.clone();
-            thread_pool.spawn(move || match stream {
-                Ok(stream) => {
-                    if let Err(e) = handle_client_req(engine, stream) {
-                        error!("Error on serving client: {}", e);
-                    }
-                }
-                Err(e) => error!("Connection failed: {}", e),
-            })
-        }
-
-        Ok(())
-    }
-}
-
-pub struct MyKvServer {
+pub struct KvServer {
     pub engine: KvStore,
     rx_compaction: Receiver<TxMessage>,
     path: PathBuf,
@@ -65,14 +36,14 @@ pub struct TxMessage {
     pub path: PathBuf,
 }
 
-impl MyKvServer {
-    pub fn new() -> MyKvServer {
+impl KvServer {
+    pub fn new() -> KvServer {
         let (tx_compaction, rx_compaction) = unbounded::<TxMessage>();
 
         let p = current_dir().unwrap();
         let engine = KvStore::new(tx_compaction.clone(), p.clone()).unwrap();
 
-        MyKvServer {
+        KvServer {
             engine: engine.to_owned(),
             rx_compaction,
             path: p,
