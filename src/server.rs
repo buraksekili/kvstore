@@ -37,6 +37,18 @@ pub struct TxMessage {
 }
 
 impl KvServer {
+    pub fn new_with_path(p: PathBuf) -> KvServer {
+        let (tx_compaction, rx_compaction) = unbounded::<TxMessage>();
+
+        let engine = KvStore::new(tx_compaction.clone(), p.clone()).unwrap();
+
+        KvServer {
+            engine: engine.to_owned(),
+            rx_compaction,
+            path: p,
+        }
+    }
+
     pub fn new() -> KvServer {
         let (tx_compaction, rx_compaction) = unbounded::<TxMessage>();
 

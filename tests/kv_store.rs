@@ -1,3 +1,5 @@
+use kvs::server::KvServer;
+use kvs::thread_pool::{NaiveThreadPool, ThreadPool};
 use kvs::{KvStore, KvsEngine, Result};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -86,7 +88,16 @@ fn remove_key() -> Result<()> {
 #[test]
 fn compaction() -> Result<()> {
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    let store = KvStore::open(temp_dir.path())?;
+    // TODO: compaction runs on server - not in KvStore which causes
+    // this test case to fail as it checks compaction on KvStore.
+    // TODO: compaction thread is not triggered
+    let s = KvServer::new_with_path(temp_dir.path().into());
+    let thread_pool = NaiveThreadPool::new(1).unwrap();
+    let store = s.engine.clone();
+    thread::spawn(move || {
+        s.start("127.0.0.1:4004".to_string(), thread_pool);
+    });
+    // let store = KvStore::open(temp_dir.path())?;
 
     let dir_size = || {
         let entries = WalkDir::new(temp_dir.path()).into_iter();
