@@ -10,11 +10,11 @@ use kvs::{
     thread_pool::{SharedQueueThreadPool, ThreadPool},
     Result,
 };
-use log::{self, debug, error, info};
+use log::{self, info};
 
 fn main() -> Result<()> {
-    if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "info")
+    if env::var("KVS_LOG").is_err() {
+        env::set_var("KVS_LOG", "info")
     }
 
     env_logger::init();
@@ -49,31 +49,7 @@ fn main() -> Result<()> {
 
     let ip = matches.get_one::<String>("ip").unwrap();
 
-    let curr_engine = matches
-        .get_one::<String>("engine")
-        .expect("failed to parse --engine for server");
-
-    // if there is an engine log file in the current directory, check if it aligns with
-    // the engine provided to the server. if there is a mismatch between them, return an
-    // error.
-    //
-    // Engine specified in 'engine' file must be the same as --engine flag value.
-    let engine_log = current_dir()?.join("engine");
-    if engine_log.exists() {
-        debug!("engine log exists");
-        let engine = fs::read_to_string(engine_log).expect("failed to read engine log file");
-        if engine != *curr_engine {
-            error!("Wrong engine!");
-            exit(1);
-        }
-    }
-
-    // write engine to engine file
-    fs::write(current_dir()?.join("engine"), format!("{}", curr_engine))?;
-
-    debug!("DEBUGGING ENABLED");
     info!("kvs-server {}", env!("CARGO_PKG_VERSION"));
-    info!("Storage engine {}", curr_engine);
     info!("Listening at {} ", ip.to_string());
 
     let pool = SharedQueueThreadPool::new(48).unwrap();
