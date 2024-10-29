@@ -70,7 +70,7 @@ impl KvServer {
         let key_dir = self.engine.key_dir.clone();
         let uncompacted = Arc::clone(&self.engine.uncompacted);
 
-        let mut reader = KvsReader {
+        let reader = KvsReader {
             path: self.path.clone(),
             readers: RefCell::new(BTreeMap::new()),
         };
@@ -103,7 +103,6 @@ impl KvServer {
 
                 let mut new_starting_pos = 0 as u64;
 
-                info!("=====> COPYING OLD LOGS");
                 // iterate through the active keys on the memory.
                 for mut entry in key_dir.iter_mut() {
                     let copied_bytes = reader
@@ -119,7 +118,6 @@ impl KvServer {
                     new_starting_pos += copied_bytes;
                 }
                 compaction_log_writer.flush()?;
-                info!("=====> COPYING OLD LOGS DONE");
 
                 let keys_to_delete: Vec<u32> = {
                     let borrowed_map = reader.readers.borrow();
@@ -145,30 +143,23 @@ impl KvServer {
                     }
                 }
 
-                info!("DELETING OLD LOGS, LEN {}", new_compaction_log_idx);
                 // todo: this is not efficient in case of big number of log files.
                 // it always starts iterating from 1 to the recent log file and tries to delete them all the time.
                 for i in 1..new_compaction_log_idx as u32 {
-                    info!("trying to delete old log file {} from from fs done\n", i);
                     fs::remove_file(path.join(format!("{}.log", i))).or_else(|e| {
                         if e.kind() == io::ErrorKind::NotFound {
-                            info!("log file {} is not found", i);
                             Ok(())
                         } else {
-                            info!("Failed to delete log file {}, err: {}", i, e);
                             Err(e)
                         }
                     })?;
-                    info!("deleting old log file {} from from fs done\n", i);
                 }
-                info!("=====> DELETING OLD LOGS");
 
                 // self.log_idx + 1 corresponds to the new log file which will include all active
                 // commands in the memory. So, the new requests need to be moved to self.log_idx + 2
                 // which will be new log entry in the file system.
                 log_idx += 2;
                 // now, update the writer so that the new log entries will be written into a new log file.
-                info!("updating log writer");
                 *log_writer = BufWriterWithPos::new(
                     OpenOptions::new()
                         .create(true)
@@ -207,7 +198,6 @@ fn handle_client_req<E>(engine: E, stream: std::net::TcpStream) -> Result<()>
 where
     E: KvsEngine,
 {
-    info!("==> New request!");
     let mut request_reader = BufReader::new(stream.try_clone().unwrap());
     let mut response_writer = BufWriter::new(stream);
 

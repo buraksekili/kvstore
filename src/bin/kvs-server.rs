@@ -8,7 +8,7 @@ use clap::{arg, builder::PossibleValue, command, value_parser};
 use kvs::{
     server::KvServer,
     thread_pool::{SharedQueueThreadPool, ThreadPool},
-    KvStore, Result, SledKvsEngine,
+    Result,
 };
 use log::{self, debug, error, info};
 

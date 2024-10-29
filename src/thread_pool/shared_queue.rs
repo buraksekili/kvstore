@@ -4,7 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex,
     },
-    thread::{self, panicking},
+    thread::{self},
     time::{Duration, Instant},
 };
 
@@ -16,7 +16,7 @@ use log::info;
 struct Worker {
     // id corresponds to the arbitrary id for the thread
     // useful while debugging :)
-    id: usize,
+    _id: usize,
     // thread is the actual thread which is going
     // to execute a real task.
     thread: Option<thread::JoinHandle<()>>,
@@ -56,7 +56,7 @@ impl Worker {
         });
 
         Worker {
-            id,
+            _id: id,
             thread: Some(thread),
         }
     }
